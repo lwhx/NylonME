@@ -406,7 +406,8 @@ async fn locomo_evidence_recall() {
                     let snip: String = txt.chars().take(100).collect();
                     println!("  E[{e}]: {snip}");
                 }
-                for (i, a) in resp.activated.iter().take(RECALL_K).enumerate() {
+                // 解剖需要看 recall@10 之外的位次（画像/桥节点是否"差一点"），打印 top-15
+                for (i, a) in resp.activated.iter().take(15).enumerate() {
                     let fact = a.filaments.as_ref().map(|f| f.fact.as_str()).unwrap_or("");
                     let snip: String = fact.chars().take(90).collect();
                     println!("  {:>2}. n{} r={:.3} {}", i + 1, a.node_id, a.resonance, snip);

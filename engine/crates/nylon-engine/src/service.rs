@@ -102,6 +102,12 @@ const AUTO_LINK_WEIGHT: f32 = 0.5;
 const DERIVED_EDGE_WEIGHT: f32 = 1.0;
 /// 常识桥接节点标签：作为扩散中间层，不进入最终激活结果。
 const WORLD_KNOWLEDGE_TAG: &str = "__world_knowledge__";
+/// 画像节点标签（ relations 前缀）：persona + person:<规范名>
+const PERSONA_TAG: &str = "persona";
+const PERSONA_NAME_PREFIX: &str = "person:";
+const PERSONA_EDGE_WEIGHT: f32 = 0.9;
+/// 画像→叶子边权重（低于画像→事实，最后一跳）
+const PERSONA_LEAF_EDGE_WEIGHT: f32 = 0.7;
 /// 常识桥接节点与抽象事实节点之间的边权重。
 const WORLD_BRIDGE_EDGE_WEIGHT: f32 = 0.8;
 
@@ -152,6 +158,8 @@ struct ReflectionJob {
     owner_id: String,
     session_text: String,
     fact_ids: Vec<u32>,
+    /// 本 session 的叶子节点 ID（画像节点连边用，打通 画像→叶子 最后一跳）
+    leaf_ids: Vec<u32>,
 }
 
 /// MemoryEngine 服务句柄（内部状态互斥保护，Phase 1 单写者够用）。
@@ -740,32 +748,280 @@ async fn process_reflection_jobs(
             continue;
         }
         let bridges = extract_commonsense_bridges(llm, &job.session_text).await;
-        if bridges.is_empty() {
-            continue;
-        }
-        let mut wrote = 0usize;
-        for bridge in bridges {
-            match write_world_bridge(
-                inner,
-                embedder,
-                &job.tenant_id,
-                &job.owner_id,
-                &job.fact_ids,
-                bridge,
-            )
-            .await
-            {
-                Ok(()) => wrote += 1,
-                Err(e) => eprintln!("[reflect] 常识桥接写入失败: {e}"),
+        if !bridges.is_empty() {
+            let mut wrote = 0usize;
+            for bridge in bridges {
+                match write_world_bridge(
+                    inner,
+                    embedder,
+                    &job.tenant_id,
+                    &job.owner_id,
+                    &job.fact_ids,
+                    bridge,
+                )
+                .await
+                {
+                    Ok(()) => wrote += 1,
+                    Err(e) => eprintln!("[reflect] 常识桥接写入失败: {e}"),
+                }
+            }
+            if wrote > 0 {
+                eprintln!(
+                    "[reflect] tenant={} owner={} 补常识桥接 {} 个",
+                    job.tenant_id, job.owner_id, wrote
+                );
             }
         }
-        if wrote > 0 {
-            eprintln!(
-                "[reflect] tenant={} owner={} 补常识桥接 {} 个",
-                job.tenant_id, job.owner_id, wrote
-            );
+        // 画像层：聚合人物特质为锚点节点（NYLON_PERSONA_REFLECT=1 开启）
+        if std::env::var("NYLON_PERSONA_REFLECT").is_ok() {
+            reflect_personas(inner, embedder, llm, &job).await;
         }
     }
+}
+
+/// 从 session 抽取/更新人物画像。existing 为已有画像（姓名, 画像文本），供 LLM 融合改写。
+async fn extract_personas(
+    llm: &dyn ChatModel,
+    session_text: &str,
+    existing: &[(String, String)],
+) -> Vec<(String, String)> {
+    let prev = if existing.is_empty() {
+        String::new()
+    } else {
+        let list = existing
+            .iter()
+            .map(|(n, p)| format!("- {n}: {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nExisting profiles to merge with new evidence (rewrite them, do not copy verbatim; preserve specific identity markers, affiliations and distinctive facts from the existing profiles, do not generalize them away):\n{list}"
+        )
+    };
+    let system = "You are a person-profile memory builder. Given a dialogue session, identify each person with substantive information and write a concise profile aggregating stable traits, preferences, relationships, life situation, and implied values or political/social leanings when inferable (mark inferences with 'likely'). Each profile must be self-contained and grounded in the dialogue. Output ONLY valid JSON: {\"personas\": [{\"name\": \"...\", \"profile\": \"...\"}]}. Skip people with no substantive information.";
+    let prompt = format!("{session_text}{prev}");
+    match llm.chat_json(system, &prompt).await {
+        Ok(v) => v
+            .get("personas")
+            .and_then(|p| p.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| {
+                        let name = x.get("name")?.as_str()?.trim().to_string();
+                        let profile = x.get("profile")?.as_str()?.trim().to_string();
+                        if name.is_empty() || profile.is_empty() {
+                            None
+                        } else {
+                            Some((name, profile))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[reflect] LLM 画像抽取失败，跳过: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// 画像层反思：为 session 中的人物生成/更新画像节点，连边到支撑事实，旧版画像墓碑化。
+async fn reflect_personas(
+    inner: &Arc<Mutex<Inner>>,
+    embedder: Option<&Arc<dyn Embedder>>,
+    llm: &dyn ChatModel,
+    job: &ReflectionJob,
+) {
+    // 该 owner 已有画像（姓名小写做键，同人合并）：(节点 id, 姓名小写, 画像文本)
+    let existing: Vec<(u32, String, String)> = {
+        let inner = match inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        inner
+            .store
+            .graph()
+            .live_nodes()
+            .filter(|(_, n)| n.tenant_id == job.tenant_id && n.owner_id == job.owner_id)
+            .filter_map(|(id, n)| {
+                n.filaments
+                    .relations
+                    .iter()
+                    .find(|r| r.starts_with(PERSONA_NAME_PREFIX))
+                    .map(|r| {
+                        (
+                            id,
+                            r[PERSONA_NAME_PREFIX.len()..].to_lowercase(),
+                            n.filaments.fact.clone(),
+                        )
+                    })
+            })
+            .collect()
+    };
+    let name_fact: Vec<(String, String)> = existing
+        .iter()
+        .map(|(_, name, fact)| (name.clone(), fact.clone()))
+        .collect();
+    let personas = extract_personas(llm, &job.session_text, &name_fact).await;
+    for (name, profile) in personas {
+        let fact_text = format!("{name}: {profile}");
+        match write_persona(
+            inner,
+            embedder,
+            &job.tenant_id,
+            &job.owner_id,
+            &job.fact_ids,
+            &job.leaf_ids,
+            &name,
+            fact_text,
+        )
+        .await
+        {
+            Ok(local) => {
+                eprintln!(
+                    "[reflect] tenant={} owner={} 画像节点 {} (person:{}): {:.160}",
+                    job.tenant_id, job.owner_id, local, name, profile
+                );
+                // 旧版画像：先把它的全部边继承给新节点（枢纽汇聚，画像生命周期内触达的
+                // 事实+叶子不断累积），再墓碑化旧版
+                let lower = name.to_lowercase();
+                let old_ids: Vec<u32> = existing
+                    .iter()
+                    .filter(|(id, n, _)| *n == lower && *id != local)
+                    .map(|(id, _, _)| *id)
+                    .collect();
+                if !old_ids.is_empty() {
+                    let inherited: Vec<(u32, f32)> = {
+                        let inner = match inner.lock() {
+                            Ok(g) => g,
+                            Err(_) => break,
+                        };
+                        old_ids
+                            .iter()
+                            .flat_map(|id| inner.store.graph().neighbors(*id))
+                            .collect()
+                    };
+                    let ticket = {
+                        let mut inner = match inner.lock() {
+                            Ok(g) => g,
+                            Err(_) => break,
+                        };
+                        let mut t = None;
+                        for (target, w) in inherited {
+                            match inner.store.add_edge(local, target, w) {
+                                Ok(nt) => t = Some(nt),
+                                Err(e) => eprintln!("[reflect] 画像边继承失败: {e}"),
+                            }
+                        }
+                        t
+                    };
+                    if let Some(t) = ticket {
+                        let _ = tokio::task::spawn_blocking(move || t.wait()).await;
+                    }
+                }
+                for (old_id, old_name, _) in &existing {
+                    if *old_name == lower && *old_id != local {
+                        let res = {
+                            let mut inner = match inner.lock() {
+                                Ok(g) => g,
+                                Err(_) => break,
+                            };
+                            inner.store.remove_node(*old_id)
+                        };
+                        match res {
+                            Ok((true, t)) => {
+                                let _ = tokio::task::spawn_blocking(move || t.wait()).await;
+                            }
+                            Ok((false, _)) => {}
+                            Err(e) => eprintln!("[reflect] 旧画像墓碑化失败: {e}"),
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("[reflect] 画像写入失败: {e}"),
+        }
+    }
+}
+
+async fn write_persona(
+    inner: &Arc<Mutex<Inner>>,
+    embedder: Option<&Arc<dyn Embedder>>,
+    tenant_id: &str,
+    owner_id: &str,
+    fact_ids: &[u32],
+    leaf_ids: &[u32],
+    name: &str,
+    fact_text: String,
+) -> Result<u32, Status> {
+    let embedding = if let Some(emb) = embedder {
+        emb.embed(std::slice::from_ref(&fact_text))
+            .await
+            .map_err(|e| Status::internal(format!("嵌入失败: {e}")))?
+            .pop()
+    } else {
+        None
+    };
+    let now = now_secs();
+    let node = MemoryNode {
+        id: 0,
+        tenant_id: tenant_id.to_string(),
+        owner_id: owner_id.to_string(),
+        filaments: Filaments {
+            fact: fact_text,
+            emotion_valence: 0.0,
+            emotion_intensity: 0.0,
+            created_at: now,
+            decay_rate: 0.01,
+            relations: vec![
+                PERSONA_TAG.to_string(),
+                format!("{PERSONA_NAME_PREFIX}{name}"),
+            ],
+            confidence: 0.6, // 推断内容，低于事实层
+            mentions_7d: 0,
+        },
+        tension: Tension {
+            baseline: 0.7, // 实体锚点，高于普通事实
+            last_updated: now,
+        },
+        embedding: embedding.unwrap_or_default(),
+    };
+    let index_embedding = node.embedding.clone();
+    let (local, ticket) = {
+        let mut inner = inner
+            .lock()
+            .map_err(|_| Status::internal("state lock poisoned"))?;
+        let (local, node_ticket) = inner
+            .store
+            .add_node(node)
+            .map_err(|e| Status::internal(format!("wal append: {e}")))?;
+        if !index_embedding.is_empty() {
+            inner.index.add(local, &index_embedding);
+        }
+        let mut t = Some(node_ticket);
+        for fid in fact_ids {
+            t = Some(
+                inner
+                    .store
+                    .add_edge(local, *fid, PERSONA_EDGE_WEIGHT)
+                    .map_err(|e| Status::internal(format!("wal append: {e}")))?,
+            );
+        }
+        for lid in leaf_ids {
+            t = Some(
+                inner
+                    .store
+                    .add_edge(local, *lid, PERSONA_LEAF_EDGE_WEIGHT)
+                    .map_err(|e| Status::internal(format!("wal append: {e}")))?,
+            );
+        }
+        (local, t)
+    };
+    if let Some(t) = ticket {
+        tokio::task::spawn_blocking(move || t.wait())
+            .await
+            .map_err(|e| Status::internal(format!("durability join: {e}")))?
+            .map_err(|e| Status::internal(format!("wal durability: {e}")))?;
+    }
+    Ok(local)
 }
 
 async fn write_world_bridge(
@@ -992,6 +1248,7 @@ impl MemoryEngine for EngineService {
                             owner_id: r.owner_id.clone(),
                             session_text: lines.join("\n"),
                             fact_ids: fact_nodes.iter().map(|f| f.node_id as u32).collect(),
+                            leaf_ids: leaf_nodes.iter().map(|l| l.node_id as u32).collect(),
                         };
                         if tx.send(job).is_err() {
                             eprintln!("[weave_session] reflection worker 已关闭，跳过异步常识桥接");

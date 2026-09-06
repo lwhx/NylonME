@@ -484,7 +484,7 @@ impl MemoryGraph {
         }
     }
 
-    fn neighbors(&self, node: u32) -> Vec<(u32, f32)> {
+    pub fn neighbors(&self, node: u32) -> Vec<(u32, f32)> {
         // 合并视图去重：同一目标只保留一条，Delta（较新）优先于 CSR
         let mut merged: HashMap<u32, f32> = HashMap::new();
         if (node as usize) + 1 < self.csr.offsets.len() {
