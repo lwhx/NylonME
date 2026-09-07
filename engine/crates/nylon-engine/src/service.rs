@@ -682,7 +682,7 @@ async fn extract_session_facts(
     llm: &dyn ChatModel,
     session_text: &str,
 ) -> Vec<(String, Vec<String>)> {
-    let system = "You are a memory extraction engine. Given a dialogue session with turn IDs, extract atomic factual memories worth remembering long-term. Resolve pronouns and partial names to canonical full names (e.g. 'she' -> the person's name). Merge duplicate information. Preserve exact details: dates, numbers, places, names. Each fact must be self-contained. Output ONLY valid JSON: {\"facts\": [{\"fact\": \"...\", \"source\": [\"event_id\", ...]}]}. Skip greetings and small talk without facts.";
+    let system = "You are a memory extraction engine. Given a dialogue session with turn IDs, extract atomic factual memories worth remembering long-term. Resolve pronouns and partial names to canonical full names (e.g. 'she' -> the person's name). Merge duplicate information. Preserve exact details: dates, numbers, places, names. If turns carry a [date] prefix, treat it as the absolute time of those turns; when event timing matters, include the absolute date in the fact rather than relative words like 'yesterday' or 'last week'. Each fact must be self-contained. Output ONLY valid JSON: {\"facts\": [{\"fact\": \"...\", \"source\": [\"event_id\", ...]}]}. Skip greetings and small talk without facts.";
     match llm.chat_json(system, session_text).await {
         Ok(v) => v
             .get("facts")

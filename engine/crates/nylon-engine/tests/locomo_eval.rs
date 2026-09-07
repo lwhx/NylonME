@@ -131,6 +131,9 @@ async fn locomo_evidence_recall() {
     let embedder_on = embedder.is_some();
     let llm = llm_from_env();
     let llm_on = llm.is_some();
+    // 端到端 QA 口径：NYLON_EVAL_E2E=1 时，除证据召回外，LLM 用 top-10 检索内容作答，
+    // 再由裁判 LLM 判定语义正确性（用户真实体验口径，LoCoMo 官方对比口径）
+    let e2e = std::env::var("NYLON_EVAL_E2E").is_ok() && llm_on;
     let query_expand = std::env::var("NYLON_QUERY_EXPAND").is_ok() && llm_on;
     // 按类别查询扩展（仅评测）：NYLON_CAT{n}_EXPAND=1 时仅对该类别启用 LLM 扩展
     let cat_expand = |cat: i64| -> bool {
@@ -180,6 +183,10 @@ async fn locomo_evidence_recall() {
     let mut per_cat: HashMap<i64, (usize, usize, usize)> = HashMap::new(); // cat -> (total, hit, seed_hit)
     let mut seed_total_hit = 0usize;
     let mut total_turns = 0usize;
+    // e2e QA 计数：cat -> (total, correct)
+    let mut qa_total = 0usize;
+    let mut qa_correct = 0usize;
+    let mut qa_per_cat: HashMap<i64, (usize, usize)> = HashMap::new();
 
     for conv in data.as_array().expect("顶层应为数组").iter().take(limit) {
         let sample = conv["sample_id"].as_str().unwrap_or("unknown").to_string();
@@ -211,6 +218,16 @@ async fn locomo_evidence_recall() {
         }
         for sess in sessions {
             let turns = conv_obj[sess].as_array().cloned().unwrap_or_default();
+            // 时间锚定（NYLON_EVAL_DATE_ANCHOR=1）：叶子文本前挂会话日期。
+            // 时序推理题（Cat2）的金答案大多是日期，没有日期上下文根本不可答。
+            let date_anchor = if std::env::var("NYLON_EVAL_DATE_ANCHOR").is_ok() {
+                conv_obj[format!("{sess}_date_time").as_str()]
+                    .as_str()
+                    .and_then(|s| s.split(" on ").nth(1).map(|d| d.to_string()))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             if session_weave {
                 // 引擎内建双层写入：一次 RPC 完成叶子层+抽象层+层间边
                 let events: Vec<SessionEvent> = turns
@@ -224,7 +241,11 @@ async fn locomo_evidence_recall() {
                         Some(SessionEvent {
                             event_id: dia.to_string(),
                             speaker: t["speaker"].as_str().unwrap_or("").to_string(),
-                            text: text.to_string(),
+                            text: if date_anchor.is_empty() {
+                                text.to_string()
+                            } else {
+                                format!("[{date_anchor}] {text}")
+                            },
                         })
                     })
                     .collect();
@@ -386,6 +407,44 @@ async fn locomo_evidence_recall() {
             if seed_hit {
                 entry.2 += 1;
             }
+            // e2e：top-10 检索内容 → LLM 作答 → 裁判判定语义正确性
+            if e2e {
+                let gold = qa["answer"].as_str().unwrap_or("");
+                if gold.trim().is_empty() {
+                    continue; // 数据集中少数条目无金答案，无法判定，不计入
+                }
+                let ctx_text = resp
+                    .activated
+                    .iter()
+                    .take(RECALL_K)
+                    .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let candidate = answer_with_context(llm.as_deref(), &ctx_text, question).await;
+                let correct = match &candidate {
+                    Some(ans) => {
+                        judge_answer(llm.as_deref(), question, gold, ans)
+                            .await
+                            .unwrap_or(false)
+                    }
+                    None => false,
+                };
+                qa_total += 1;
+                if correct {
+                    qa_correct += 1;
+                }
+                let e = qa_per_cat.entry(cat).or_insert((0, 0));
+                e.0 += 1;
+                if correct {
+                    e.1 += 1;
+                }
+                if dump_miss && !correct && dump_cat.map(|c| c == cat).unwrap_or(true) {
+                    println!("\n[QA-WRONG] sample={sample} cat={cat} recall_hit={ok}");
+                    println!("  Q: {question}");
+                    println!("  gold: {gold}");
+                    println!("  ours: {}", candidate.as_deref().unwrap_or("<无答案>"));
+                }
+            }
             if dump_miss && !ok && dump_cat.map(|c| c == cat).unwrap_or(true) {
                 // 证据在完整 budget（默认 32）内的最早位次：None=完全没召回，11+=排序问题
                 let evidence_pos = evidence
@@ -455,9 +514,82 @@ async fn locomo_evidence_recall() {
             *sh as f64 / *t as f64 * 100.0
         );
     }
+    if e2e && qa_total > 0 {
+        println!();
+        println!("=== 端到端 QA 准确率（top-{RECALL_K} 检索 → LLM 作答 → 裁判判定） ===");
+        println!(
+            "有效 QA: {qa_total}, 答对: {qa_correct}, accuracy = {:.1}%",
+            qa_correct as f64 / qa_total as f64 * 100.0
+        );
+        let mut qcats: Vec<_> = qa_per_cat.iter().map(|(c, v)| (*c, *v)).collect();
+        qcats.sort_by_key(|(c, _)| *c);
+        for (cat, (t, c)) in &qcats {
+            println!(
+                "  category {cat}: {c}/{t} = {:.1}%",
+                *c as f64 / *t as f64 * 100.0
+            );
+        }
+    }
 }
 
 /// LLM 查询扩展：普通类目扩关键词；Cat3 可选 HyDE 生成假设证据句。
+/// e2e LLM 调用重试：网络抖动/限流时退避重试，避免单点失败污染准确率。
+async fn llm_json_retry(
+    llm: &dyn nylon_llm::ChatModel,
+    system: &str,
+    user: &str,
+) -> Option<serde_json::Value> {
+    let mut delay = 5u64;
+    for attempt in 1..=4u32 {
+        match llm.chat_json(system, user).await {
+            Ok(v) => return Some(v),
+            Err(e) => {
+                if attempt == 4 {
+                    eprintln!("[eval] e2e LLM 调用重试 4 次仍失败: {e}");
+                    return None;
+                }
+                eprintln!("[eval] e2e LLM 调用失败（第 {attempt}/4 次），{delay}s 后重试: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                delay = (delay * 2).min(60);
+            }
+        }
+    }
+    None
+}
+
+/// 作答器：仅用检索到的记忆回答问题，信息不足必须答 "Not mentioned"。
+async fn answer_with_context(
+    llm: Option<&dyn nylon_llm::ChatModel>,
+    ctx: &str,
+    question: &str,
+) -> Option<String> {
+    let llm = llm?;
+    let system = "You are answering a question about past conversations. Use ONLY the retrieved memories below as your knowledge. Think step by step, then output the final answer. If the memories do not contain enough information, the answer must be exactly \"Not mentioned\". Output ONLY valid JSON: {\"answer\": \"...\"}.";
+    let user = format!("Retrieved memories:\n{ctx}\n\nQuestion: {question}");
+    let v = llm_json_retry(llm, system, &user).await?;
+    v.get("answer")?
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 裁判：语义等价判定（允许措辞差异与合理推理，日期/数字近似可接受）。
+async fn judge_answer(
+    llm: Option<&dyn nylon_llm::ChatModel>,
+    question: &str,
+    gold: &str,
+    candidate: &str,
+) -> Option<bool> {
+    let llm = llm?;
+    let system = "You are a strict but fair evaluation judge. Given a question, a reference answer, and a candidate answer, decide if the candidate conveys the same substantive answer. Wording may differ; reasonable inference grounded in the reference is acceptable; approximate dates/numbers are acceptable if close. If the candidate says the information is not mentioned but the reference exists, it is wrong. Output ONLY valid JSON: {\"correct\": true} or {\"correct\": false}.";
+    let user =
+        format!("Question: {question}\nReference answer: {gold}\nCandidate answer: {candidate}");
+    llm_json_retry(llm, system, &user)
+        .await?
+        .get("correct")?
+        .as_bool()
+}
+
 async fn expand_query(
     llm: Option<&dyn nylon_llm::ChatModel>,
     question: &str,
