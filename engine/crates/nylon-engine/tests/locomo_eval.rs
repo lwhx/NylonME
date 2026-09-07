@@ -39,6 +39,8 @@ const RECALL_K: usize = 10;
 /// （2026-09-07 实测 /models 与响应回声确认），强模型必须用 deepseek-v4-pro。
 /// 推理模型作答保持 thinking 开启（预算 8192，超时 120s），
 /// 否则思考链烧光默认 1536 token 导致 JSON 截断、被误判为答错。
+/// NYLON_EVAL_QA_TEMPERATURE：数字=显式温度；"omit"=不发送该字段
+/// （kimi-k3 只接受 temperature=1，显式发 0 会被 HTTP 400 拒绝）。
 fn qa_llm_from_env() -> Option<std::sync::Arc<dyn ChatModel>> {
     let url = std::env::var("NYLON_EVAL_QA_URL")
         .ok()
@@ -51,10 +53,16 @@ fn qa_llm_from_env() -> Option<std::sync::Arc<dyn ChatModel>> {
         .ok()
         .or_else(|| std::env::var("NYLON_LLM_API_KEY").ok());
     println!("[eval] e2e 作答/裁判模型: {model}");
+    let temp = match std::env::var("NYLON_EVAL_QA_TEMPERATURE").ok().as_deref() {
+        Some("omit") => None,
+        Some(s) => s.parse::<f32>().ok().map(Some).unwrap_or(Some(0.0)),
+        None => Some(0.0),
+    };
     let m = HttpChatModel::new(url, model, key)
         .with_thinking_off(false)
         .with_max_tokens(8192)
-        .with_timeout(120);
+        .with_timeout(120)
+        .with_temperature(temp);
     Some(std::sync::Arc::new(m))
 }
 

@@ -35,6 +35,7 @@ pub struct HttpChatModel {
     /// 是否显式关闭推理（thinking: disabled）。默认读 NYLON_LLM_THINKING_OFF。
     thinking_off: bool,
     max_tokens: u32,
+    temperature: Option<f32>,
 }
 
 #[derive(serde::Serialize)]
@@ -42,7 +43,9 @@ struct ChatReq<'a> {
     model: &'a str,
     messages: [Msg<'a>; 2],
     response_format: RespFmt<'a>,
-    temperature: f32,
+    /// None 时不发送该字段（k3 等模型只允许 temperature=1，显式发 0 会被拒）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Thinking<'a>>,
@@ -89,7 +92,15 @@ impl HttpChatModel {
             api_key,
             thinking_off: std::env::var("NYLON_LLM_THINKING_OFF").is_ok(),
             max_tokens: 1536,
+            temperature: Some(0.0),
         }
+    }
+
+    /// 覆盖温度；传 None 则请求不携带 temperature 字段
+    /// （kimi-k3 等模型只接受 temperature=1，必须省略该字段）。
+    pub fn with_temperature(mut self, t: Option<f32>) -> Self {
+        self.temperature = t;
+        self
     }
 
     /// 覆盖推理开关（默认跟 NYLON_LLM_THINKING_OFF 环境变量）。
@@ -155,7 +166,7 @@ impl ChatModel for HttpChatModel {
             response_format: RespFmt {
                 kind: "json_object",
             },
-            temperature: 0.0,
+            temperature: self.temperature,
             max_tokens: self.max_tokens,
             // 推理关闭时显式发 thinking: disabled（deepseek-v4-flash 等推理模型
             // 会烧光 token 预算导致 JSON 截断）；默认不开关、由模型自己决定
