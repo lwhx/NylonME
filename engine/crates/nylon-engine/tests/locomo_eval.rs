@@ -215,7 +215,8 @@ async fn locomo_evidence_recall() {
     // e2e QA 计数：cat -> (total, correct)
     let mut qa_total = 0usize;
     let mut qa_correct = 0usize;
-    let mut qa_per_cat: HashMap<i64, (usize, usize)> = HashMap::new();
+    let mut qa_correct_strict = 0usize;
+    let mut qa_per_cat: HashMap<i64, (usize, usize, usize)> = HashMap::new();
 
     for conv in data.as_array().expect("顶层应为数组").iter().take(limit) {
         let sample = conv["sample_id"].as_str().unwrap_or("unknown").to_string();
@@ -450,22 +451,33 @@ async fn locomo_evidence_recall() {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let candidate = answer_with_context(qa_llm.as_deref(), &ctx_text, question).await;
-                let correct = match &candidate {
+                // 双裁判：论文口径（Mem0 Appendix A，从宽，对外可比）+ 内部严格口径（从严，看真实质量）
+                let (correct, correct_strict) = match &candidate {
                     Some(ans) => {
-                        judge_answer(qa_llm.as_deref(), question, gold, ans)
+                        let p = judge_answer_paper(qa_llm.as_deref(), question, gold, ans)
                             .await
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                        let s = judge_answer_strict(qa_llm.as_deref(), question, gold, ans)
+                            .await
+                            .unwrap_or(false);
+                        (p, s)
                     }
-                    None => false,
+                    None => (false, false),
                 };
                 qa_total += 1;
                 if correct {
                     qa_correct += 1;
                 }
-                let e = qa_per_cat.entry(cat).or_insert((0, 0));
+                if correct_strict {
+                    qa_correct_strict += 1;
+                }
+                let e = qa_per_cat.entry(cat).or_insert((0, 0, 0));
                 e.0 += 1;
                 if correct {
                     e.1 += 1;
+                }
+                if correct_strict {
+                    e.2 += 1;
                 }
                 if dump_miss && !correct && dump_cat.map(|c| c == cat).unwrap_or(true) {
                     println!("\n[QA-WRONG] sample={sample} cat={cat} recall_hit={ok}");
@@ -545,17 +557,19 @@ async fn locomo_evidence_recall() {
     }
     if e2e && qa_total > 0 {
         println!();
-        println!("=== 端到端 QA 准确率（top-{RECALL_K} 检索 → LLM 作答 → 裁判判定） ===");
+        println!("=== 端到端 QA 准确率（top-{RECALL_K} 检索 → LLM 作答 → 双裁判判定） ===");
         println!(
-            "有效 QA: {qa_total}, 答对: {qa_correct}, accuracy = {:.1}%",
-            qa_correct as f64 / qa_total as f64 * 100.0
+            "有效 QA: {qa_total}, 论文口径(J): {qa_correct} = {:.1}% | 严格口径: {qa_correct_strict} = {:.1}%",
+            qa_correct as f64 / qa_total as f64 * 100.0,
+            qa_correct_strict as f64 / qa_total as f64 * 100.0
         );
         let mut qcats: Vec<_> = qa_per_cat.iter().map(|(c, v)| (*c, *v)).collect();
         qcats.sort_by_key(|(c, _)| *c);
-        for (cat, (t, c)) in &qcats {
+        for (cat, (t, c, cs)) in &qcats {
             println!(
-                "  category {cat}: {c}/{t} = {:.1}%",
-                *c as f64 / *t as f64 * 100.0
+                "  category {cat}: J {c}/{t} = {:.1}% | 严格 {cs}/{t} = {:.1}%",
+                *c as f64 / *t as f64 * 100.0,
+                *cs as f64 / *t as f64 * 100.0
             );
         }
     }
@@ -586,14 +600,23 @@ async fn llm_json_retry(
     None
 }
 
-/// 作答器：仅用检索到的记忆回答问题，信息不足必须答 "Not mentioned"。
+/// 作答器（对齐 Mem0 论文生成模板，Appendix A "Prompt Template for Results Generation"）：
+/// 仅用检索记忆作答；时间相对引用按记忆时间戳换算绝对日期；矛盾取最新；
+/// 答案尽量简短（宽松裁判配套）；信息不足必须答 "Not mentioned"。
 async fn answer_with_context(
     llm: Option<&dyn nylon_llm::ChatModel>,
     ctx: &str,
     question: &str,
 ) -> Option<String> {
     let llm = llm?;
-    let system = "You are answering a question about past conversations. Use ONLY the retrieved memories below as your knowledge. Think step by step, then output the final answer. If the memories do not contain enough information, the answer must be exactly \"Not mentioned\". Output ONLY valid JSON: {\"answer\": \"...\"}.";
+    let system = "You are an intelligent memory assistant tasked with retrieving accurate information from conversation memories. \
+        Instructions: \
+        1. Carefully analyze all provided memories; each memory may be prefixed with a timestamp like [8 May, 2023], pay special attention to these timestamps. \
+        2. If the memories contain contradictory information, prioritize the most recent memory. \
+        3. For relative time references (like \"last year\" or \"two months ago\"), calculate the specific date, month, or year based on the memory timestamps. \
+        4. Formulate a precise, concise answer based solely on the evidence in the memories: a short phrase for factual questions, or the minimal list of items for listing questions. \
+        5. If the memories do not contain enough information, the answer must be exactly \"Not mentioned\". \
+        Output ONLY valid JSON: {\"answer\": \"...\"}.";
     let user = format!("Retrieved memories:\n{ctx}\n\nQuestion: {question}");
     let v = llm_json_retry(llm, system, &user).await?;
     v.get("answer")?
@@ -602,8 +625,32 @@ async fn answer_with_context(
         .filter(|s| !s.is_empty())
 }
 
-/// 裁判：语义等价判定（允许措辞差异与合理推理，日期/数字近似可接受）。
-async fn judge_answer(
+/// 裁判·论文口径（Mem0 论文 Appendix A 几乎逐字，binary CORRECT/WRONG，从宽）：
+/// "触及同一话题即 CORRECT"、时间题宽松。J 分 = CORRECT 占比（论文跑 10 次取均值，我们跑 1 次）。
+async fn judge_answer_paper(
+    llm: Option<&dyn nylon_llm::ChatModel>,
+    question: &str,
+    gold: &str,
+    candidate: &str,
+) -> Option<bool> {
+    let llm = llm?;
+    let system = "Your task is to label an answer to a question as \"CORRECT\" or \"WRONG\". You will be given the following data: (1) a question (posed by one user to another user), (2) a 'gold' (ground truth) answer, (3) a generated answer which you will score as CORRECT/WRONG. \
+        The point of the question is to ask about something one user should know about the other user based on their prior conversations. The gold answer will usually be a concise and short answer that includes the referenced topic. \
+        The generated answer might be much longer, but you should be generous with your grading - as long as it touches on the same topic as the gold answer, it should be counted as CORRECT. \
+        For time related questions, the gold answer will be a specific date, month, year, etc. The generated answer might be much longer or use relative time references (like 'last Tuesday' or 'next month'), but you should be generous with your grading - as long as it refers to the same date or time period as the gold answer, it should be counted as CORRECT. Even if the format differs (e.g., 'May 7th' vs '7 May'), consider it CORRECT if it's the same date. \
+        Return ONLY valid JSON with the label: {\"label\": \"CORRECT\"} or {\"label\": \"WRONG\"}.";
+    let user =
+        format!("Question: {question}\nGold answer: {gold}\nGenerated answer: {candidate}");
+    llm_json_retry(llm, system, &user)
+        .await?
+        .get("label")?
+        .as_str()
+        .map(|s| s.trim().eq_ignore_ascii_case("CORRECT"))
+}
+
+/// 裁判·内部严格口径（原 judge_answer）：语义等价判定，用于观察真实作答质量，
+/// 与论文宽松口径并列报告，防止从宽裁判掩盖半对答案。
+async fn judge_answer_strict(
     llm: Option<&dyn nylon_llm::ChatModel>,
     question: &str,
     gold: &str,
