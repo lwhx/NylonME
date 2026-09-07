@@ -20,7 +20,7 @@ mod auth;
 #[path = "../src/service.rs"]
 mod service;
 
-use nylon_llm::llm_from_env;
+use nylon_llm::{llm_from_env, ChatModel, HttpChatModel};
 use nylon_storage::PersistentGraph;
 use service::pb::memory_engine_client::MemoryEngineClient;
 use service::pb::memory_engine_server::MemoryEngineServer;
@@ -29,6 +29,34 @@ use service::EngineService;
 use std::collections::HashMap;
 
 const RECALL_K: usize = 10;
+
+/// e2e 作答/裁判专用模型：NYLON_EVAL_QA_MODEL 覆盖作答与裁判所用模型，
+/// URL/Key 缺省回落 NYLON_LLM_URL / NYLON_LLM_API_KEY。
+/// 动机（2026-09-07）：e2e 与编织共用 deepseek-v4-flash，作答瓶颈掩盖了
+/// 检索层的真实水位（recall 86.3% 但 e2e 仅 55.9%）。分离后可用强模型
+/// （如 deepseek-v4-pro）作答，测出"检索够强、作答拖后腿"的真实差距。
+/// 注意：deepseek-chat / deepseek-reasoner 已是 deepseek-v4-flash 的别名
+/// （2026-09-07 实测 /models 与响应回声确认），强模型必须用 deepseek-v4-pro。
+/// 推理模型作答保持 thinking 开启（预算 8192，超时 120s），
+/// 否则思考链烧光默认 1536 token 导致 JSON 截断、被误判为答错。
+fn qa_llm_from_env() -> Option<std::sync::Arc<dyn ChatModel>> {
+    let url = std::env::var("NYLON_EVAL_QA_URL")
+        .ok()
+        .or_else(|| std::env::var("NYLON_LLM_URL").ok())?;
+    let model = std::env::var("NYLON_EVAL_QA_MODEL")
+        .ok()
+        .or_else(|| std::env::var("NYLON_LLM_MODEL").ok())
+        .unwrap_or_else(|| "deepseek-v4-flash".into());
+    let key = std::env::var("NYLON_EVAL_QA_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("NYLON_LLM_API_KEY").ok());
+    println!("[eval] e2e 作答/裁判模型: {model}");
+    let m = HttpChatModel::new(url, model, key)
+        .with_thinking_off(false)
+        .with_max_tokens(8192)
+        .with_timeout(120);
+    Some(std::sync::Arc::new(m))
+}
 
 /// 网络抖动重试：LLM/嵌入服务瞬时不可达时指数退避重试，
 /// 避免 1 小时长跑评测因一次网卡掉线全盘作废（2026-09-06 两次踩坑）。
@@ -134,6 +162,7 @@ async fn locomo_evidence_recall() {
     // 端到端 QA 口径：NYLON_EVAL_E2E=1 时，除证据召回外，LLM 用 top-10 检索内容作答，
     // 再由裁判 LLM 判定语义正确性（用户真实体验口径，LoCoMo 官方对比口径）
     let e2e = std::env::var("NYLON_EVAL_E2E").is_ok() && llm_on;
+    let qa_llm = if e2e { qa_llm_from_env() } else { None };
     let query_expand = std::env::var("NYLON_QUERY_EXPAND").is_ok() && llm_on;
     // 按类别查询扩展（仅评测）：NYLON_CAT{n}_EXPAND=1 时仅对该类别启用 LLM 扩展
     let cat_expand = |cat: i64| -> bool {
@@ -420,10 +449,10 @@ async fn locomo_evidence_recall() {
                     .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let candidate = answer_with_context(llm.as_deref(), &ctx_text, question).await;
+                let candidate = answer_with_context(qa_llm.as_deref(), &ctx_text, question).await;
                 let correct = match &candidate {
                     Some(ans) => {
-                        judge_answer(llm.as_deref(), question, gold, ans)
+                        judge_answer(qa_llm.as_deref(), question, gold, ans)
                             .await
                             .unwrap_or(false)
                     }
