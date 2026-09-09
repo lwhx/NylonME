@@ -35,11 +35,79 @@ fn demo_node(id: u64, fact: &str, relations: &[&str], mentions: u32) -> MemoryNo
     }
 }
 
+/// `nylon-engine keys` —— key 表离线管理（新增/列出/吊销）。
+/// 引擎开了鉴权且 key 表来自文件时热加载生效，无需重启服务。
+///
+///   keys add [--tenant T] [--scope read|write|admin] [--key <显式key>] [--file 路径]
+///   keys list [--file 路径]
+///   keys revoke <完整key或唯一前缀> [--file 路径]
+///
+/// --file 缺省读 NYLON_API_KEYS_FILE。
+fn keys_cli(args: &[String]) {
+    fn opt(args: &[String], name: &str) -> Option<String> {
+        args.windows(2)
+            .find(|w| w[0] == name)
+            .map(|w| w[1].clone())
+    }
+    let file = match opt(args, "--file").or_else(|| std::env::var("NYLON_API_KEYS_FILE").ok()) {
+        Some(f) => std::path::PathBuf::from(f),
+        None => {
+            eprintln!("缺 --file（或设 NYLON_API_KEYS_FILE）");
+            std::process::exit(2);
+        }
+    };
+    let die = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1);
+    };
+    match args.first().map(|s| s.as_str()) {
+        Some("add") => {
+            let tenant = opt(args, "--tenant").unwrap_or_else(|| "default".into());
+            let scope = opt(args, "--scope").unwrap_or_else(|| "write".into());
+            match auth::keys_add(&file, &tenant, &scope, opt(args, "--key")) {
+                Ok(key) => println!(
+                    "已签发（完整 key 只显示这一次）：\n  {key}\n  tenant={tenant} scope={scope}\n  已写入 {}（引擎热加载，立即生效）",
+                    file.display()
+                ),
+                Err(e) => die(e),
+            }
+        }
+        Some("list") => match auth::keys_list(&file) {
+            Ok(rows) => {
+                println!("{:<14} {:<12} {:<6}", "key", "tenant", "scope");
+                for (k, t, s) in rows {
+                    println!("{k:<14} {t:<12} {s:<6}");
+                }
+            }
+            Err(e) => die(e),
+        },
+        Some("revoke") => {
+            let Some(prefix) = args.get(1).filter(|a| !a.starts_with("--")) else {
+                die("用法: keys revoke <完整key或唯一前缀> [--file 路径]".into());
+            };
+            match auth::keys_revoke(&file, prefix) {
+                Ok(key) => println!("已吊销 {key}（引擎热加载，立即生效）"),
+                Err(e) => die(e),
+            }
+        }
+        _ => {
+            eprintln!(
+                "用法:\n  nylon-engine keys add [--tenant T] [--scope read|write|admin] [--key K] [--file F]\n  nylon-engine keys list [--file F]\n  nylon-engine keys revoke <key前缀> [--file F]"
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("genkey") {
         // 生成一把 API key；写入 NYLON_API_KEYS(_FILE) 后引擎才启用鉴权
         println!("{}", auth::generate_key());
+        return;
+    }
+    if args.get(1).map(|s| s.as_str()) == Some("keys") {
+        keys_cli(&args[2..]);
         return;
     }
     if args.get(1).map(|s| s.as_str()) == Some("serve") {

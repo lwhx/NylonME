@@ -208,18 +208,18 @@ Every memory belongs to a **tenant** (team/space) and an **owner** (user/project
 By default the engine runs in **open mode** (single machine, no keys) and stays fully backward compatible. To share one daemon across a team, enable API-key auth on the server:
 
 ```bash
-# 1. mint keys
-nylon-engine genkey   # -> nyl_<32 hex>
-
-# 2. hand them to the engine (file or inline JSON)
-export NYLON_API_KEYS='[
-  {"key": "nyl_aaa...", "tenant": "myteam", "scope": "read"},
-  {"key": "nyl_bbb...", "tenant": "myteam", "scope": "write"},
-  {"key": "nyl_ccc...", "tenant": "*",      "scope": "admin"}
-]'
-# or: export NYLON_API_KEYS_FILE=/etc/nylonme/keys.json
-
+# 1. point at a keys file and start — on first boot the engine generates
+#    an admin key for you and prints it exactly once
+export NYLON_API_KEYS_FILE=/etc/nylonme/keys.json
 nylon-engine serve 0.0.0.0:50051
+# -> "NylonME 鉴权初始化：已生成管理员 key（仅显示这一次）: nyl_..."
+
+# 2. mint keys for teammates — hot-reloaded, no restart needed
+nylon-engine keys add --tenant myteam --scope write   # -> nyl_... (shown once)
+nylon-engine keys list                                 # masked overview
+nylon-engine keys revoke nyl_aaa                       # by key or unique prefix
+
+# (inline JSON via NYLON_API_KEYS also works, but disables hot reload)
 ```
 
 Scopes: `read` (resonate/search/get), `write` (read + weave), `admin` (write + wildcard `"*"` tenant). Each key is bound to one tenant; a request whose `tenant_id` doesn't match the key is rejected. Clients pass the key as gRPC metadata `x-api-key`, or HTTP header `x-api-key: <key>` / `Authorization: Bearer <key>`. The MCP bridge and `nylon_cli` forward `NYLON_API_KEY` automatically.
