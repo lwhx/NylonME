@@ -22,6 +22,9 @@ const I18N = {
     "btn.weave": "Weave", "btn.weaveSession": "Weave session",
     "drawer.node": "Node",
     "ph.filter": "filter facts…",
+    "ph.apikey": "API key (optional)",
+    "tip.apikey": "API key — required when the engine has auth enabled; stored locally",
+    "auth.need": "401 unauthorized — enter your API key in the header",
     "ph.query": "query — e.g. flight seat preference",
     "ph.fact": "a self-contained fact, e.g. Alice prefers window seats on business trips",
     "ph.task": "task tag (optional)",
@@ -65,6 +68,9 @@ const I18N = {
     "btn.weave": "编织", "btn.weaveSession": "编织会话",
     "drawer.node": "节点",
     "ph.filter": "过滤事实…",
+    "ph.apikey": "API key（可选）",
+    "tip.apikey": "API key——引擎开启鉴权时必填；仅保存在本机浏览器",
+    "auth.need": "401 未授权——请在顶栏填入你的 API key",
     "ph.query": "查询——例如：出差时的座位偏好",
     "ph.fact": "一条自包含的事实，例如：Alice 出差喜欢靠窗座位",
     "ph.task": "任务标签（可选）",
@@ -142,13 +148,32 @@ ownerEl.addEventListener("change", () => {
 
 const owner = () => ownerEl.value.trim() || "default";
 
+/* ---------- api key ---------- */
+const keyEl = $("apikey");
+keyEl.value = localStorage.getItem("nylon.apikey") || "";
+keyEl.addEventListener("change", () => {
+  localStorage.setItem("nylon.apikey", keyEl.value.trim());
+  keyEl.classList.remove("needs-key");
+  loadStats();
+  loadMemories();
+});
+
 async function api(path, body) {
+  const key = keyEl.value.trim();
+  const authH = key ? { "x-api-key": key } : {};
   const opts = body === undefined
-    ? { method: "GET" }
-    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    ? { method: "GET", headers: authH }
+    : { method: "POST", headers: { ...authH, "Content-Type": "application/json" }, body: JSON.stringify(body) };
   const r = await fetch(path, opts);
   const data = await r.json().catch(() => ({}));
+  if (r.status === 401) {
+    keyEl.classList.add("needs-key");
+    keyEl.focus();
+    toast(t("auth.need"));
+    throw new Error(t("auth.need"));
+  }
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  keyEl.classList.remove("needs-key");
   return data;
 }
 
