@@ -799,7 +799,9 @@ async fn extract_personas(
     };
     let system = "You are a person-profile memory builder. Given a dialogue session, identify each person with substantive information and write a concise profile aggregating stable traits, preferences, relationships, life situation, and implied values or political/social leanings when inferable (mark inferences with 'likely'). Each profile must be self-contained and grounded in the dialogue. Output ONLY valid JSON: {\"personas\": [{\"name\": \"...\", \"profile\": \"...\"}]}. Skip people with no substantive information.";
     let prompt = format!("{session_text}{prev}");
-    match llm.chat_json(system, &prompt).await {
+    // 画像要重写全部已有画像 + 新画像，输出随 session 数增长；
+    // 默认 1536 预算在后段 session 必截断（实测失败率 18/58），给足 4096
+    match llm.chat_json_budget(system, &prompt, 4096).await {
         Ok(v) => v
             .get("personas")
             .and_then(|p| p.as_array())

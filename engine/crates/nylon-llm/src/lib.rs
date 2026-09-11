@@ -12,6 +12,18 @@ use std::time::Duration;
 pub trait ChatModel: Send + Sync {
     /// 请求模型输出 JSON 对象（后端不支持 json_object 时退化为文本解析）。
     async fn chat_json(&self, system: &str, user: &str) -> Result<serde_json::Value, LlmError>;
+
+    /// 带输出预算的 JSON 请求。默认忽略预算回退 chat_json；
+    /// HTTP 后端克隆自身覆盖 max_tokens（画像合并等多实体长输出场景，
+    /// 默认 1536 会截断 JSON——实测 2 会话评测 58 次画像抽取失败 18 次）。
+    async fn chat_json_budget(
+        &self,
+        system: &str,
+        user: &str,
+        _max_tokens: u32,
+    ) -> Result<serde_json::Value, LlmError> {
+        self.chat_json(system, user).await
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +162,25 @@ fn parse_json_loose(text: &str) -> Result<serde_json::Value, LlmError> {
 
 #[async_trait::async_trait]
 impl ChatModel for HttpChatModel {
+    async fn chat_json_budget(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<serde_json::Value, LlmError> {
+        // reqwest::Client 内部是 Arc，克隆廉价；只换输出预算
+        let bigger = HttpChatModel {
+            client: self.client.clone(),
+            url: self.url.clone(),
+            model: self.model.clone(),
+            api_key: self.api_key.clone(),
+            thinking_off: self.thinking_off,
+            max_tokens,
+            temperature: self.temperature,
+        };
+        bigger.chat_json(system, user).await
+    }
+
     async fn chat_json(&self, system: &str, user: &str) -> Result<serde_json::Value, LlmError> {
         let req = ChatReq {
             model: &self.model,
