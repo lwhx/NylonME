@@ -454,6 +454,17 @@ async fn locomo_evidence_recall() {
                 let ctx_text = resp
                     .activated
                     .iter()
+                    // 机制验证（NYLON_EVAL_CAT2_NO_PERSONA=1）：时序题作答上下文剔除画像节点。
+                    // 画像是跨时间聚合文本、无日期锚点，实测会把时序题答案带偏
+                    // （第二轮 A/B：Cat2 错题 7/8 召回命中但答错）。先过滤再取 Top-K，
+                    // 让被剔除的画像名额由后续证据补位；recall@10 统计不受影响（用上文未过滤的 got）。
+                    .filter(|a| {
+                        !(cat == 2
+                            && std::env::var("NYLON_EVAL_CAT2_NO_PERSONA").is_ok()
+                            && a.filaments
+                                .as_ref()
+                                .is_some_and(|f| f.relations.iter().any(|r| r == "persona")))
+                    })
                     .take(RECALL_K)
                     .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
                     .collect::<Vec<_>>()
