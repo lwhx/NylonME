@@ -1,0 +1,50 @@
+{
+  "name": "@nylonme/dsh-nylonme-memory",
+  "description": "DeepSeek Harness (DSH) plugin: automatic long-term memory backed by a self-hosted NylonME engine. Resonate at session start to inject recalled context; WeaveSession at session end to persist the conversation.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "cordis.patch.yml",
+    "skills",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "memory",
+    "nylonme",
+    "plugin",
+    "resonate",
+    "weave"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "test:integration": "node test/integration.mjs",
+    "test:live": "node test/live.mjs"
+  }
+}

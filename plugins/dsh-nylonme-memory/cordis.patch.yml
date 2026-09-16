@@ -1,0 +1,31 @@
+# NylonME memory for DeepSeek Harness — bundle patch.
+#
+# Applied as ONE insert over the profile root. Later layers (the profile's
+# cordis.patch.yml or a --patch overlay) may override this row's config by id
+# ("nylonme-memory") — the last write per row wins.
+#
+# Configuration is read from the environment first so the same installed
+# package works per-machine without editing any file:
+#   NYLON_ENGINE_URL   NylonME HTTP REST base (default http://127.0.0.1:50052)
+#   NYLON_API_KEY      engine API key (sent as x-api-key / Bearer) when auth is on
+#   NYLON_TENANT       tenant id (default "default")
+#   NYLON_OWNER        explicit owner override; empty => derive from workspace slug
+#
+# Any of these can also be set statically by copying this row into the
+# profile's cordis.patch.yml and replacing the `!!js` expressions.
+
+- insert:
+    - id: nylonme-memory
+      name: '@nylonme/dsh-nylonme-memory'
+      config:
+        url: !!js process.env.NYLON_ENGINE_URL ?? 'http://127.0.0.1:50052'
+        apiKey: !!js process.env.NYLON_API_KEY ?? ''
+        tenant: !!js process.env.NYLON_TENANT ?? 'default'
+        owner: !!js process.env.NYLON_OWNER ?? ''
+        autoRecall: true
+        autoWeave: true
+        recallBudget: 8
+        weaveMinChars: 200
+        weaveMaxEvents: 400
+        weaveSubagents: false
+        timeoutMs: 20000
