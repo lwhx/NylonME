@@ -944,6 +944,7 @@ async fn reflect_personas(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 8 个参数，多为传入的只读上下文；拆结构体收益低于可读性
 async fn write_persona(
     inner: &Arc<Mutex<Inner>>,
     embedder: Option<&Arc<dyn Embedder>>,
