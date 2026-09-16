@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev pkg-config libssl-dev
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin the toolchain so clippy/fmt/test are deterministic; a rolling
+      # stable introduces new lints that break -D warnings on older code.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

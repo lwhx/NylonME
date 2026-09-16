@@ -41,7 +41,8 @@ jobs:
         run: |
           choco install -y protoc
           Add-Content $env:GITHUB_PATH "C:\msys64\mingw64\bin"
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin for deterministic release builds (matches ci.yml).
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
 
