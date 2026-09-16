@@ -17,13 +17,14 @@ LoCoMo evidence recall@10, full 10-session corpus (1536 answerable QA, lexical +
 | + vector seeds (bge-m3) + graph | 70.6% |
 | + dual-layer write (leaf turns + session-level LLM facts) | 79.2% |
 | + adaptive resonance depth (Cat4 single-hop queries skip diffusion) | 80.1% |
-| + query-vector rerank of the activated set | **84.6%** |
-| + async commonsense reflection (world-knowledge bridges) | **85.3%** |
+| + query-vector rerank of the activated set | 84.6% |
+| + async commonsense reflection (world-knowledge bridges) | **85.4%** |
 
-Per-category (full corpus): multi-hop 84.8%, temporal 86.6%, commonsense 60.9%, single-hop 87.6%.
+Per-category recall (full corpus): multi-hop 82.6%, temporal 89.4%, commonsense 63.0%, single-hop 87.6%.
+
+End-to-end QA (LLM answers from the retrieved Top-10, judge-scored): paper protocol **75.4%** (Mem0 Appendix A wording), strict protocol **70.1%**. Full method, per-category tables and variance notes in [docs/LOCOMO_BENCHMARK.md](docs/LOCOMO_BENCHMARK.md).
 
 Two design rules the experiments forced on us: the **understanding layer lives on the write side** (the LLM is a compiler that turns raw events into retrievable structure; query-side LLM expansion measured net-zero), and **both layers must coexist** (abstract-layer-only retrieval drops the score to 67.3%).
-
 
 ## Use from Your Agent in 2 Minutes (MCP)
 
@@ -43,6 +44,18 @@ Two design rules the experiments forced on us: the **understanding layer lives o
 
 Works with Claude Code, Cursor, Codex, VS Code Copilot and any MCP client. Your agent gets three tools: `memory_weave` (persist a fact), `memory_resonate` (recall related memories), `memory_get` (read a node). See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for per-client setup.
 
+To share one memory store across machines, use optional **remote bridge mode**: set `NYLON_SERVER=host:50051` (optionally `NYLON_API_KEY`); MCP calls are forwarded to the remote engine and no engine is embedded locally.
+
+### Turnkey memory for DSH (DeepSeek Harness)
+
+The repo ships a DSH plugin that gives every DSH session automatic long-term memory (resonate at session start, weave at session end, zero binaries on the client):
+
+```bash
+dsh plugin --profile web add <nylon/plugins/dsh-nylonme-memory>
+```
+
+See [plugins/dsh-nylonme-memory/README.md](plugins/dsh-nylonme-memory/README.md).
+
 ## Web Console (built-in)
 
 The engine binary also serves a zero-install web console and REST API (default `http://127.0.0.1:50052`, `NYLON_HTTP_ADDR=off` disables):
@@ -50,6 +63,16 @@ The engine binary also serves a zero-install web console and REST API (default `
 ![NylonME Console](docs/ui-console.png)
 
 Browse memories with real-time tension, debug resonance queries (seeds, scores, adaptive depth), and weave new memories by hand — same engine, same write path as gRPC/MCP. REST endpoints mirror the gRPC contract; spec: [docs/api/openapi.json](docs/api/openapi.json). Dark/light themes and an EN/中文 toggle are built in.
+
+## Multi-tenancy & Auth
+
+The engine supports tenant isolation (L2.1) and API-key auth (L2.2) with three tiers read < write < admin:
+
+- No keys configured: open mode (single-node default), identical to historical behavior;
+- Set `NYLON_API_KEYS_FILE` (or inline `NYLON_API_KEYS`) to enable auth: HTTP sends `x-api-key` header or `Authorization: Bearer <key>`, gRPC sends `x-api-key` metadata;
+- First boot mints one admin key and prints it once; then `nylon-engine keys add/list/revoke` issues keys to teammates (key table hot-reloads, no restart).
+
+An audit event stream (L2.3) is gated by `NYLON_AUDIT`; query `GET /v1/audit` to see who is using and who is hammering the engine.
 
 ## Python SDK
 
@@ -127,37 +150,57 @@ cargo run --release --example nylon_cli -- resonate --owner alice --query "when 
 cargo run --release --example nylon_cli -- weave --owner alice --fact "Alice prefers window seats"
 ```
 
+## Backup & Restore
+
+RocksDB supports periodic snapshot + WAL truncation (`NYLON_CHECKPOINT_SECS`, default 600s) plus manual `POST /v1/checkpoint` for hot backup. Full steps in [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md).
+
 ## Tuning Knobs (env vars)
 
 | Variable | Default | Effect |
 |---|---|---|
 | `NYLON_MAX_SEEDS` | 20 | seed set size cap (lexical + vector channels) |
-| `NYLON_CAT{n}_MAX_HOPS` | — | per-query-type diffusion depth override (`0` = seeds only, no spread) |
 | `NYLON_RERANK_VEC` | 0 | blend weight of query-node cosine similarity into resonance ranking |
 | `NYLON_TENSION_FLOOR` | 0 | lower bound on tension during ranking (does not mutate node state) |
 | `NYLON_SEED_QUOTA` | 0 | reserved front slots for direct-match seeds in the output |
 | `NYLON_DERIVED_EDGES` | off | explicit abstract-layer → leaf edges (measured net-negative for temporal/commonsense, keep off) |
+| `NYLON_WORLD_BRIDGES` / `NYLON_WORLD_BRIDGES_ASYNC` | off | commonsense world-knowledge bridges (sync / async reflection) |
+| `NYLON_PERSONA_REFLECT` | off | persona profile nodes in async reflection |
+| `NYLON_REFLECT_IDLE_SECS` | — | async reflection idle trigger interval |
+| `NYLON_HTTP_ADDR` | 127.0.0.1:50052 | HTTP/UI listen address (`off` disables) |
+| `NYLON_DATA_DIR` | ./nylon-data | RocksDB data directory |
+| `NYLON_CHECKPOINT_SECS` | 600 | periodic snapshot interval in seconds (0 disables) |
+| `NYLON_API_KEYS_FILE` / `NYLON_API_KEYS` | — | API key table (file path or inline JSON) |
+| `NYLON_AUDIT` | off | audit event stream toggle |
+| `NYLON_SERVER` | — | MCP remote bridge target (`host:50051`) |
+| `NYLON_API_KEY` | — | key a client sends to a remote engine (remote bridge / CLI) |
+| `NYLON_OWNER` / `NYLON_TENANT` | default | default MCP owner / tenant |
 
 ## Repository Layout
 
 ```
-nylon/
+NylonME/
 ├── proto/            # nylon/v1 gRPC contract (Weave / WeaveSession / Resonate / Search / GetNode)
-└── engine/           # Rust workspace
-    └── crates/
-        ├── nylon-core    # filament data model + tension forgetting
-        ├── nylon-graph   # CSR main graph + delta buffer + resonance traversal
-        ├── nylon-vector  # HNSW vector index
-        ├── nylon-embed   # embedding client (ollama / OpenAI-compatible)
-        ├── nylon-llm     # understanding layer: fact weaving, conflict detection
-        ├── nylon-storage # RocksDB persistence (WAL + snapshot, crash recovery)
-        └── nylon-engine  # engine entrypoint + gRPC service (tonic)
+├── engine/           # Rust workspace
+│   └── crates/
+│       ├── nylon-core    # filament data model + tension forgetting
+│       ├── nylon-graph   # CSR main graph + delta buffer + resonance traversal
+│       ├── nylon-vector  # HNSW vector index
+│       ├── nylon-embed   # embedding client (ollama / OpenAI-compatible)
+│       ├── nylon-llm     # understanding layer: fact weaving, conflict detection
+│       ├── nylon-storage # RocksDB persistence (WAL + snapshot, crash recovery)
+│       ├── nylon-service # server/mobile shared core
+│       └── nylon-engine  # engine entrypoint + gRPC service (tonic)
+├── sdk/python/       # Python SDK (nylon-sdk)
+├── integrations/     # LangChain / LlamaIndex adapters
+├── plugins/          # DSH and other agent-platform plugins
+├── docs/             # guides and API spec
+└── helm/             # Kubernetes deployment
 ```
 
 ## Roadmap
 
-Done: dual-layer write engine (WeaveSession), hybrid lexical+vector seeds, adaptive resonance depth, query-vector rerank, HNSW, RocksDB persistence, gRPC serving, LoCoMo 84.6%.
-Next: commonsense-reasoning retrieval path (Cat3, currently 53.3%), cross-encoder reranker, Python SDK, 1M-node memory profiling, paper & blog series.
+Done: dual-layer write engine (WeaveSession), hybrid lexical+vector seeds, adaptive resonance depth, query-vector rerank, HNSW, RocksDB persistence, gRPC serving, LoCoMo 85.4%, REST/OpenAPI gateway + web console, Python SDK, LangChain/LlamaIndex integrations, tenant isolation (L2.1), API-key auth (L2.2), audit stream (L2.3), periodic snapshot + backup (L2.4), Docker one-command deployment, Helm chart, DSH plugin.
+Next: cross-encoder reranker, 1M-node memory profiling, paper & blog series.
 
 ## Contributing
 

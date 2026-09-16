@@ -18,8 +18,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "grpcio>=1.60",
-    "protobuf>=5.26",
+    "grpcio>=1.83",
+    "protobuf>=7.35",
 ]
 
 [project.urls]

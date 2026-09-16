@@ -1509,8 +1509,7 @@ impl MemoryEngine for EngineService {
         // 种子保底：直接命中的种子提升置顶（取重排后种子的相对顺序），
         // 防止词面/向量双通道的精确命中被高张力扩散邻居挤出 Top-K
         if seed_quota > 0 {
-            let seed_set: std::collections::HashSet<u32> =
-                seeds.iter().map(|&(s, _)| s).collect();
+            let seed_set: std::collections::HashSet<u32> = seeds.iter().map(|&(s, _)| s).collect();
             let mut hoisted: Vec<(u32, f32)> = Vec::new();
             let mut rest: Vec<(u32, f32)> = Vec::with_capacity(activated.len());
             for item in activated {
