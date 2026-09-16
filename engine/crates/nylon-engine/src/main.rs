@@ -220,7 +220,7 @@ fn main() {
         });
         return;
     }
-    println!("nylon-engine v0.1.0 (Phase 1 scaffold)");
+    println!("nylon-engine v{} (Phase 2)", env!("CARGO_PKG_VERSION"));
 
     // 构建一个迷你记忆网：机票 -> 出差偏好 -> 酒店偏好 / 上次出差时间
     let mut g = MemoryGraph::new();
