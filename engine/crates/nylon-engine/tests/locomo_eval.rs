@@ -781,6 +781,30 @@ async fn locomo_evidence_recall() {
                     }
                 }
             }
+            // 推断节点解剖（NYLON_EVAL_DUMP_INFER=1）：打印 top-10 中推断节点的位次/原文，
+            // 验证"个人化推断是否真正进入作答上下文"——结构性修复的有效性探针。
+            if std::env::var("NYLON_EVAL_DUMP_INFER").is_ok()
+                && dump_cat.map(|c| c == cat).unwrap_or(true)
+            {
+                for (i, a) in resp.activated.iter().take(10).enumerate() {
+                    let is_infer = a
+                        .filaments
+                        .as_ref()
+                        .map(|f| f.relations.iter().any(|r| r == "inferred"))
+                        .unwrap_or(false);
+                    if is_infer {
+                        let fact =
+                            a.filaments.as_ref().map(|f| f.fact.as_str()).unwrap_or("");
+                        let snip: String = fact.chars().take(120).collect();
+                        println!(
+                            "[INFER] sample={sample} cat={cat} rank={} n{} r={:.3} :: {snip}",
+                            i + 1,
+                            a.node_id,
+                            a.resonance
+                        );
+                    }
+                }
+            }
         }
     }
 

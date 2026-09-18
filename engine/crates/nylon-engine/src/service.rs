@@ -102,6 +102,9 @@ const AUTO_LINK_WEIGHT: f32 = 0.5;
 const DERIVED_EDGE_WEIGHT: f32 = 1.0;
 /// 常识桥接节点标签：作为扩散中间层，不进入最终激活结果。
 const WORLD_KNOWLEDGE_TAG: &str = "__world_knowledge__";
+/// 个人化推断节点标记（NYLON_REFLECT_PERSONAL）：可进 resonate 输出与作答上下文，
+/// 与 WORLD_KNOWLEDGE_TAG（只许扩散、输出层过滤）结构性区分。
+const INFERRED_TAG: &str = "inferred";
 /// 画像节点标签（ relations 前缀）：persona + person:<规范名>
 const PERSONA_TAG: &str = "persona";
 const PERSONA_NAME_PREFIX: &str = "person:";
@@ -110,6 +113,8 @@ const PERSONA_EDGE_WEIGHT: f32 = 0.9;
 const PERSONA_LEAF_EDGE_WEIGHT: f32 = 0.7;
 /// 常识桥接节点与抽象事实节点之间的边权重。
 const WORLD_BRIDGE_EDGE_WEIGHT: f32 = 0.8;
+/// 个人化推断节点 → 来源事实的边权（与常识桥同档）。
+const INFER_EDGE_WEIGHT: f32 = 0.8;
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -751,6 +756,30 @@ async fn extract_commonsense_bridges(llm: &dyn ChatModel, session_text: &str) ->
     }
 }
 
+/// 从 session 提炼个人化推断（"她对咖啡因的回避始于怀孕"），作为**可输出**的推断节点。
+/// 结构性修复：常识桥带 WORLD_KNOWLEDGE_TAG 只许扩散、输出层被过滤，内容永远到不了
+/// 作答 LLM；个人化推断锚定对话中的具体人物、不带过滤标记，可进 Top-K 与作答上下文。
+/// 失败返回空。
+async fn extract_personal_inferences(llm: &dyn ChatModel, session_text: &str) -> Vec<String> {
+    let system = "You are a personal memory reasoner. Given a dialogue session, derive 1-3 personalized inference statements that connect or explain facts about the people in the dialogue (motivations, causes, preference changes, life events linking multiple facts). Each statement must: name the specific person(s), be self-contained, be grounded in the dialogue (no generic world knowledge), and be phrased as a careful inference. Output ONLY valid JSON: {\"inferences\": [\"...\", ...]}. If nothing meaningful can be inferred, output {\"inferences\": []}.";
+    match llm.chat_json(system, session_text).await {
+        Ok(v) => v
+            .get("inferences")
+            .and_then(|b| b.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[reflect] LLM 个人化推断分解失败，跳过: {e}");
+            Vec::new()
+        }
+    }
+}
+
 async fn process_reflection_jobs(
     inner: &Arc<Mutex<Inner>>,
     embedder: Option<&Arc<dyn Embedder>>,
@@ -761,7 +790,12 @@ async fn process_reflection_jobs(
         if job.fact_ids.is_empty() {
             continue;
         }
-        let bridges = extract_commonsense_bridges(llm, &job.session_text).await;
+        // NYLON_WORLD_BRIDGES_OFF=1 可单独关掉泛泛常识桥（A/B 第三臂用）
+        let bridges = if std::env::var("NYLON_WORLD_BRIDGES_OFF").is_ok() {
+            Vec::new()
+        } else {
+            extract_commonsense_bridges(llm, &job.session_text).await
+        };
         if !bridges.is_empty() {
             let mut wrote = 0usize;
             for bridge in bridges {
@@ -782,6 +816,33 @@ async fn process_reflection_jobs(
             if wrote > 0 {
                 eprintln!(
                     "[reflect] tenant={} owner={} 补常识桥接 {} 个",
+                    job.tenant_id, job.owner_id, wrote
+                );
+            }
+        }
+        // 个人化推断层（NYLON_REFLECT_PERSONAL=1）：锚定具体人物的可输出推断节点，
+        // 修复"桥只许扩散不许输出"的结构性问题——推断内容可进 Top-K 与作答上下文。
+        if std::env::var("NYLON_REFLECT_PERSONAL").is_ok() {
+            let inferences = extract_personal_inferences(llm, &job.session_text).await;
+            let mut wrote = 0usize;
+            for inf in inferences {
+                match write_personal_inference(
+                    inner,
+                    embedder,
+                    &job.tenant_id,
+                    &job.owner_id,
+                    &job.fact_ids,
+                    inf,
+                )
+                .await
+                {
+                    Ok(()) => wrote += 1,
+                    Err(e) => eprintln!("[reflect] 个人化推断写入失败: {e}"),
+                }
+            }
+            if wrote > 0 {
+                eprintln!(
+                    "[reflect] tenant={} owner={} 补个人化推断 {} 个",
                     job.tenant_id, job.owner_id, wrote
                 );
             }
@@ -1096,6 +1157,77 @@ async fn write_world_bridge(
                 inner
                     .store
                     .add_edge(local, *fid, WORLD_BRIDGE_EDGE_WEIGHT)
+                    .map_err(|e| Status::internal(format!("wal append: {e}")))?,
+            );
+        }
+        t
+    };
+    if let Some(t) = ticket {
+        tokio::task::spawn_blocking(move || t.wait())
+            .await
+            .map_err(|e| Status::internal(format!("durability join: {e}")))?
+            .map_err(|e| Status::internal(format!("wal durability: {e}")))?;
+    }
+    Ok(())
+}
+
+/// 写个人化推断节点：不带 WORLD_KNOWLEDGE_TAG（可进 resonate 输出），
+/// relations 打 "inferred" 标记供下游/评测区分，边连来源事实。
+async fn write_personal_inference(
+    inner: &Arc<Mutex<Inner>>,
+    embedder: Option<&Arc<dyn Embedder>>,
+    tenant_id: &str,
+    owner_id: &str,
+    fact_ids: &[u32],
+    inference: String,
+) -> Result<(), Status> {
+    let embedding = if let Some(emb) = embedder {
+        emb.embed(std::slice::from_ref(&inference))
+            .await
+            .map_err(|e| Status::internal(format!("嵌入失败: {e}")))?
+            .pop()
+    } else {
+        None
+    };
+    let now = now_secs();
+    let node = MemoryNode {
+        id: 0,
+        tenant_id: tenant_id.to_string(),
+        owner_id: owner_id.to_string(),
+        filaments: Filaments {
+            fact: inference,
+            emotion_valence: 0.0,
+            emotion_intensity: 0.0,
+            created_at: now,
+            decay_rate: 0.01,
+            relations: vec![INFERRED_TAG.to_string()],
+            confidence: 0.55,
+            mentions_7d: 0,
+        },
+        tension: Tension {
+            baseline: 0.65,
+            last_updated: now,
+        },
+        embedding: embedding.unwrap_or_default(),
+    };
+    let index_embedding = node.embedding.clone();
+    let ticket = {
+        let mut inner = inner
+            .lock()
+            .map_err(|_| Status::internal("state lock poisoned"))?;
+        let (local, node_ticket) = inner
+            .store
+            .add_node(node)
+            .map_err(|e| Status::internal(format!("wal append: {e}")))?;
+        if !index_embedding.is_empty() {
+            inner.index.add(local, &index_embedding);
+        }
+        let mut t = Some(node_ticket);
+        for fid in fact_ids {
+            t = Some(
+                inner
+                    .store
+                    .add_edge(local, *fid, INFER_EDGE_WEIGHT)
                     .map_err(|e| Status::internal(format!("wal append: {e}")))?,
             );
         }
@@ -1567,6 +1699,38 @@ impl MemoryEngine for EngineService {
                 Some(to_activated(id, score, n))
             })
             .collect();
+        // 失败驱动反思的数据采集（v2）：零命中/弱命中查询追加到 JSONL，
+        // 只用引擎内部信号（命中数/最高张力），不依赖任何金标签。
+        // 离线反思 worker 读这个日志对失败簇定向补推断节点。
+        if let Ok(path) = std::env::var("NYLON_FAILURE_LOG") {
+            let top = out.first().map(|a| a.resonance).unwrap_or(0.0);
+            let min_score = std::env::var("NYLON_FAILURE_MIN_SCORE")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.5);
+            if out.is_empty() || top < min_score {
+                let esc = |s: &str| {
+                    s.replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace(['\n', '\r'], " ")
+                };
+                let line = format!(
+                    "{{\"ts\":{},\"tenant\":\"{}\",\"owner\":\"{}\",\"query\":\"{}\",\"hits\":{},\"seeds\":{},\"top\":{:.4}}}\n",
+                    now_secs(),
+                    esc(&r.tenant_id),
+                    esc(&r.owner_id),
+                    esc(&r.query),
+                    out.len(),
+                    seeds.len(),
+                    top
+                );
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                {
+                    use std::io::Write;
+                    let _ = f.write_all(line.as_bytes());
+                }
+            }
+        }
         self.audit_op(
             "resonate",
             &r.tenant_id,
