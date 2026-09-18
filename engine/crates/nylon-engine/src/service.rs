@@ -185,10 +185,24 @@ impl EngineService {
         embedder: Option<Arc<dyn Embedder>>,
         llm: Option<Arc<dyn ChatModel>>,
     ) -> Self {
-        let inner = Arc::new(Mutex::new(Inner {
-            store,
-            index: HnswIndex::new(embed_dims),
-        }));
+        // 重启/重开库时从持久化节点回填 HNSW 索引——此前索引只在 weave 时增量构建，
+        // 重启后向量种子通道静默失效（2026-09-18 评测缓存复用时暴露：
+        // 种子召回 90.7% -> 84.7%，生产服务器每次重启同样中招）。
+        let mut index = HnswIndex::new(embed_dims);
+        {
+            let g = store.graph();
+            let mut restored = 0usize;
+            for (id, n) in g.live_nodes() {
+                if n.embedding.len() == embed_dims {
+                    index.add(id, &n.embedding);
+                    restored += 1;
+                }
+            }
+            if restored > 0 {
+                eprintln!("[engine] HNSW 索引已从持久化节点回填 {restored} 条");
+            }
+        }
+        let inner = Arc::new(Mutex::new(Inner { store, index }));
         let reflect_tx = llm.clone().map(|llm| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReflectionJob>();
             let inner = Arc::clone(&inner);
@@ -1481,6 +1495,18 @@ impl MemoryEngine for EngineService {
             .unwrap_or(0.0);
         // 种子保底提升统一在向量重排之后做（服务侧），否则重排会打乱图内的提升结果
         let mut activated = g.resonate_opts(&seeds, &ctx, now_secs(), budget, tension_floor, 0);
+        // 种子补齐：扩散阶段可能因 budget 截断/张力门槛把部分种子挡在激活集外
+        // （2026-09-14 十会话评测发现 13 例 seed_hit=true 但 evidence_pos=None）。
+        // 直接命中的种子必须留在候选集内，交由后续重排/保底决定最终位次。
+        {
+            let present: std::collections::HashSet<u32> =
+                activated.iter().map(|(id, _)| *id).collect();
+            for (sid, sscore) in &seeds {
+                if !present.contains(sid) {
+                    activated.push((*sid, *sscore));
+                }
+            }
+        }
         // 向量重排：用查询向量对激活集做直接余弦相似度混合打分，校正共振排序
         if rerank_alpha > 0.0 {
             if let Some(q) = &qvec {
