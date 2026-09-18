@@ -292,6 +292,7 @@ async fn locomo_evidence_recall() {
                     })
                     .collect();
                 if !events.is_empty() {
+                    let skip_abstract = std::env::var("NYLON_EVAL_SKIP_ABSTRACT").is_ok(); // A4 消融：仅叶层
                     let resp = rpc_with_retry("weave_session", || {
                         let mut c = client.clone();
                         let events = events.clone();
@@ -301,7 +302,7 @@ async fn locomo_evidence_recall() {
                                 tenant_id: "locomo".into(),
                                 owner_id: owner,
                                 events,
-                                skip_abstract: false,
+                                skip_abstract: skip_abstract,
                             })
                             .await
                         }
@@ -355,6 +356,12 @@ async fn locomo_evidence_recall() {
             let cat = qa["category"].as_i64().unwrap_or(0);
             if cat == 5 {
                 continue; // 对抗题不计入
+            }
+            // 仅评某类（消融用）：NYLON_EVAL_ONLY_CAT=3 时跳过其他类别
+            if let Ok(only) = std::env::var("NYLON_EVAL_ONLY_CAT") {
+                if only.parse::<i64>().map(|o| cat != o).unwrap_or(false) {
+                    continue;
+                }
             }
             let evidence: Vec<String> = qa["evidence"]
                 .as_array()

@@ -253,6 +253,30 @@ async fn openapi() -> impl IntoResponse {
     )
 }
 
+// ---------- /mcp：Streamable HTTP MCP 端点（零二进制接入） ----------
+
+/// /mcp 鉴权中间件：端点暴露 weave，要求 write 档位；key 必须覆盖服务端租户。
+/// 租户不匹配时报错附带排查指引（P2：多用户铺开时最常见的诡异 403）。
+async fn mcp_auth(
+    State(svc): State<EngineService>,
+    headers: HeaderMap,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, ApiError> {
+    let tenant = std::env::var("NYLON_TENANT").unwrap_or_else(|_| DEFAULT_TENANT.into());
+    http_authorize(svc.auth(), &headers, Scope::Write, Some(&tenant)).map_err(|s| {
+        if s.code() == tonic::Code::PermissionDenied {
+            map_status(tonic::Status::permission_denied(format!(
+                "{}。/mcp 服务端租户={tenant}——请确认你的 key 覆盖该租户（找管理员核对），或检查 NYLON_TENANT 配置",
+                s.message()
+            )))
+        } else {
+            map_status(s)
+        }
+    })?;
+    Ok(next.run(req).await)
+}
+
 // ---------- REST 端点 ----------
 
 async fn stats(
@@ -434,7 +458,13 @@ async fn search(
 // ---------- 路由与启动 ----------
 
 pub fn router(svc: EngineService) -> Router {
+    // /mcp：MCP 客户端贴一个 URL + key 即可接入（不需要本机桥进程）。
+    // 与 REST/UI 共用同一 HTTP 端口；鉴权由 mcp_auth 中间件把守。
+    let mcp_service = tower::ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(svc.clone(), mcp_auth))
+        .service(crate::mcp::streamable_http_service(svc.clone()));
     Router::new()
+        .nest_service("/mcp", mcp_service)
         .route("/", get(ui_index))
         .route("/app.js", get(ui_js))
         .route("/style.css", get(ui_css))

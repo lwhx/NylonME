@@ -178,6 +178,23 @@ NYLON_OWNER = "my-project"
 
 The agent then gets three tools: `memory_weave` (persist a fact), `memory_resonate` (recall related memories), `memory_get` (read a node by id).
 
+### Zero-binary option: the `/mcp` HTTP endpoint
+
+When the engine runs as a shared daemon, its HTTP port also serves a **Streamable HTTP MCP endpoint** at `http://<host>:50052/mcp`. Clients that support remote MCP servers (Claude Code, Cursor, Codex, DSH, ...) can connect with nothing but a URL — no local binary, no bridge process:
+
+```json
+{
+  "mcpServers": {
+    "nylonme": {
+      "url": "http://192.168.1.5:50052/mcp",
+      "headers": { "x-api-key": "nyl_..." }
+    }
+  }
+}
+```
+
+The endpoint shares the in-process engine (same data as gRPC/REST), requires a **write-scope** key when auth is enabled, and validates the key against the server tenant (`NYLON_TENANT`, default `default`). The endpoint is stateless (no session affinity needed) and answers plain JSON. Host-header validation is off by default (the endpoint is key-authed); for public deployments pin it with `NYLON_MCP_ALLOWED_HOSTS="mcp.example.com"`.
+
 ### Share one engine across machines (remote bridge)
 
 Set `NYLON_SERVER` and the same `mcp` subcommand becomes a thin bridge: every tool call is forwarded to the remote engine over gRPC, the local process holds **no data**, and multiple machines/IDEs share one memory store:
