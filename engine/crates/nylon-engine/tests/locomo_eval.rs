@@ -537,6 +537,79 @@ async fn locomo_evidence_recall() {
             } else {
                 resp
             };
+            // 多通道补充检索 + RRF 融合：
+            //   NYLON_CAT{n}_DECOMPOSE=1 —— LLM 拆原子子查询（多跳题各跳各找）
+            //   NYLON_CAT{n}_ENTITY=1    —— 实体名单独检索（聚合题补上下文广度）
+            let extra_queries: Vec<String> = {
+                let mut qs: Vec<String> = Vec::new();
+                if std::env::var(format!("NYLON_CAT{cat}_DECOMPOSE")).is_ok() {
+                    qs.extend(
+                        decompose_query(expander.as_deref(), question)
+                            .await
+                            .into_iter()
+                            .filter(|s| s != question),
+                    );
+                }
+                if std::env::var(format!("NYLON_CAT{cat}_ENTITY")).is_ok() {
+                    qs.extend(extract_entities(question));
+                }
+                qs
+            };
+            let resp = if extra_queries.is_empty() {
+                resp
+            } else {
+                let mut lists: Vec<Vec<ActivatedNode>> = vec![resp.activated.clone()];
+                for sq in &extra_queries {
+                    let r = rpc_with_retry("resonate-sub", || {
+                        let mut c = client.clone();
+                        let owner = sample.clone();
+                        let query = sq.clone();
+                        async move {
+                            c.resonate(ResonateRequest {
+                                tenant_id: "locomo".into(),
+                                owner_id: owner,
+                                query,
+                                context: cat_hops(cat).map(|h| ContextSpectrum {
+                                    task: None,
+                                    emotion_valence: None,
+                                    device: None,
+                                    max_hops: Some(h),
+                                }),
+                                budget: std::env::var("NYLON_BUDGET")
+                                    .ok()
+                                    .and_then(|v| v.parse().ok())
+                                    .unwrap_or(32),
+                            })
+                            .await
+                        }
+                    })
+                    .await;
+                    lists.push(r.activated);
+                }
+                // RRF：score = Σ w/(60 + rank)，主查询权重 1.0，补充通道权重
+                // NYLON_RRF_EXTRA_W（默认 0.3）——补充通道只填主查询的空档，
+                // 等权会让泛化实体结果与精准命中平分 Top-10（R6 实测 -27.6pp）
+                let extra_w: f32 = std::env::var("NYLON_RRF_EXTRA_W")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.3);
+                let mut rrf: HashMap<u64, (f32, ActivatedNode)> = HashMap::new();
+                for (li, list) in lists.iter().enumerate() {
+                    let w = if li == 0 { 1.0f32 } else { extra_w };
+                    for (rank, a) in list.iter().enumerate() {
+                        let s = w / (61.0 + rank as f32);
+                        rrf.entry(a.node_id)
+                            .and_modify(|(score, _)| *score += s)
+                            .or_insert_with(|| (s, a.clone()));
+                    }
+                }
+                let mut merged: Vec<(f32, ActivatedNode)> = rrf.into_values().collect();
+                merged.sort_by(|a, b| b.0.total_cmp(&a.0));
+                ResonateResponse {
+                    activated: merged.into_iter().map(|(_, a)| a).collect(),
+                    seed_ids: resp.seed_ids,
+                }
+            };
             let got: Vec<u64> = resp
                 .activated
                 .iter()
@@ -674,6 +747,38 @@ async fn locomo_evidence_recall() {
                         a.resonance,
                         snip
                     );
+                }
+            }
+            // 全证据缺口解剖（NYLON_EVAL_DUMP_ALLHIT=1）：any-hit 但非全命中时，
+            // 逐条证据打印其在完整激活集里的最佳位次——11-32 位=排序问题，缺位=检索问题
+            if std::env::var("NYLON_EVAL_DUMP_ALLHIT").is_ok()
+                && ok
+                && !all_hit
+                && dump_cat.map(|c| c == cat).unwrap_or(true)
+            {
+                println!("\n[HOP-MISS] sample={sample} cat={cat}");
+                println!("  Q: {question}");
+                for e in &evidence {
+                    let pos = dia2nodes.get(e).and_then(|ns| {
+                        ns.iter()
+                            .filter_map(|n| {
+                                resp.activated
+                                    .iter()
+                                    .position(|a| a.node_id == *n)
+                                    .map(|p| p + 1)
+                            })
+                            .min()
+                    });
+                    let in_seed = dia2nodes
+                        .get(e)
+                        .map(|ns| ns.iter().any(|n| resp.seed_ids.contains(n)))
+                        .unwrap_or(false);
+                    let txt = dia2text.get(e).map(|s| s.as_str()).unwrap_or("");
+                    let snip: String = txt.chars().take(80).collect();
+                    match pos {
+                        Some(p) => println!("  E[{e}] pos={p} seed={in_seed} :: {snip}"),
+                        None => println!("  E[{e}] pos=ABSENT seed={in_seed} :: {snip}"),
+                    }
                 }
             }
         }
@@ -860,4 +965,75 @@ async fn expand_query(
         return None;
     }
     Some(format!("{question} {}", kws.join(" ")))
+}
+
+/// 多跳问题分解（NYLON_CAT{n}_DECOMPOSE=1）：LLM 把复杂问题拆成 1-3 个原子子查询，
+/// 每个子查询各跑一次共振，按 RRF（reciprocal rank fusion）融合。
+/// 动机（2026-09-18）：Cat1 全证据命中仅 27.3%——单查询往往只找回第一跳；
+/// PRF 伪相关反馈实测 -7.8pp（反馈放大第一跳簇，挤掉第二跳），
+/// 分解让不同子查询各找一跳，RRF 防止单一查询的簇主导。
+async fn decompose_query(
+    llm: Option<&dyn nylon_llm::ChatModel>,
+    question: &str,
+) -> Vec<String> {
+    let Some(llm) = llm else {
+        return Vec::new();
+    };
+    let system = "You decompose complex questions about past conversations into atomic search sub-queries. \
+        Output ONLY valid JSON: {\"sub\": [\"...\", ...]} with 1-3 sub-queries that together cover the question. \
+        Each sub-query should target one specific fact, event, or time point mentioned or implied by the question. \
+        If the question is already atomic, return a single-element list with the original question. \
+        Use the original language of the question. No explanations.";
+    let v = match llm.chat_json(system, question).await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    v.get("sub")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::trim))
+                .filter(|x| !x.is_empty())
+                .map(|x| x.to_string())
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 聚合题实体补充检索（NYLON_CAT{n}_ENTITY=1）：从问题里抽大写开头的人名/实体，
+/// 以实体名单独跑共振，与主查询结果 RRF 融合。
+/// 动机（2026-09-18）：Cat1 全证据缺口中 3/4 的缺位跳完全不在激活池内，
+/// 且多为聚合题（"What activities does Melanie partake in?"）——证据轮与问题
+/// 词面/语义重叠极低，单查询无法触达；实体名查询种子覆盖该人的全部事实，
+/// 恰好补上聚合所需的上下文广度。
+fn extract_entities(question: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "What", "Where", "When", "Which", "Who", "Whose", "Why", "How", "Does", "Do", "Did",
+        "Is", "Are", "Was", "Were", "Has", "Have", "Had", "The", "This", "That", "These",
+        "Those", "Would", "Could", "Should", "Will", "Can", "May", "Might", "January",
+        "February", "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December", "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for tok in question.split(|c: char| !c.is_alphanumeric()) {
+        if tok.len() < 3 {
+            continue;
+        }
+        let mut chars = tok.chars();
+        if !chars.next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            continue;
+        }
+        if STOP.iter().any(|s| s.eq_ignore_ascii_case(tok)) {
+            continue;
+        }
+        if !out.iter().any(|e| e == tok) {
+            out.push(tok.to_string());
+        }
+        if out.len() >= 2 {
+            break;
+        }
+    }
+    out
 }
