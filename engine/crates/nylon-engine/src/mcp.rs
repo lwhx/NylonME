@@ -266,3 +266,56 @@ async fn run(
     service.waiting().await?;
     Ok(())
 }
+
+// ---------- Streamable HTTP 模式（/mcp 端点，路径 B：客户端零二进制） ----------
+
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+};
+
+impl NylonMcp {
+    pub fn new(
+        svc: Arc<dyn pb::memory_engine_server::MemoryEngine>,
+        tenant: String,
+        default_owner: String,
+    ) -> Self {
+        Self {
+            svc,
+            tenant,
+            default_owner,
+        }
+    }
+}
+
+/// 构建挂到 HTTP 服务器上的 /mcp 服务：与 stdio 模式共享同一套工具定义，
+/// 但直接调用进程内引擎（不走 gRPC 转发）。
+///
+/// - 无会话状态（legacy_session_mode=false）：每个请求自包含，多客户端
+///   并发互不干扰，重启不丢会话；
+/// - json_response=true：简单工具调用直接回 JSON，不开 SSE 流；
+/// - Host 校验：默认关闭（端点已有 key 鉴权，见 http.rs 的 /mcp 中间件）；
+///   公网部署时用 NYLON_MCP_ALLOWED_HOSTS="host1,host2" 收紧。
+pub fn streamable_http_service(
+    svc: EngineService,
+) -> StreamableHttpService<NylonMcp, LocalSessionManager> {
+    let tenant = std::env::var("NYLON_TENANT").unwrap_or_else(|_| "default".into());
+    let owner = std::env::var("NYLON_OWNER").unwrap_or_else(|_| "default".into());
+    // non_exhaustive 结构体：不能字面量构造，先 default 再改字段
+    let mut config = StreamableHttpServerConfig::default();
+    config.legacy_session_mode = false;
+    config.json_response = true;
+    match std::env::var("NYLON_MCP_ALLOWED_HOSTS") {
+        Ok(v) => {
+            config.allowed_hosts = v.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        Err(_) => {
+            config = config.disable_allowed_hosts();
+        }
+    }
+    let svc: Arc<dyn pb::memory_engine_server::MemoryEngine> = Arc::new(svc);
+    StreamableHttpService::new(
+        move || Ok(NylonMcp::new(svc.clone(), tenant.clone(), owner.clone())),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    )
+}
