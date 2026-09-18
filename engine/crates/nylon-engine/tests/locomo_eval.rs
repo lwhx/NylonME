@@ -157,8 +157,38 @@ async fn locomo_evidence_recall() {
             .expect("解析 JSON 失败");
 
     // 内存端口起服务
-    let dir = tempfile::tempdir().unwrap();
-    let store = PersistentGraph::open(dir.path()).unwrap();
+    // 编织结果缓存（NYLON_EVAL_STORE_DIR）：查询侧实验（PRF/重排/扩展）复用同一份
+    // 编织库，跳过约 1 小时的织入阶段，迭代从小时级降到分钟级。
+    // 注意：编织侧配置变更（SESSION_WEAVE/SKIP_ABSTRACT/BRIDGES/DATE_ANCHOR/嵌入模型）
+    // 必须换用新的缓存目录，否则混库。
+    let cache_dir = std::env::var("NYLON_EVAL_STORE_DIR").ok();
+    let (_tmpdir, store_path) = match &cache_dir {
+        Some(d) => {
+            std::fs::create_dir_all(d).expect("创建缓存目录失败");
+            (None, std::path::PathBuf::from(d))
+        }
+        None => {
+            let t = tempfile::tempdir().unwrap();
+            let p = t.path().to_path_buf();
+            (Some(t), p)
+        }
+    };
+    let cache_file = cache_dir
+        .as_ref()
+        .map(|d| std::path::Path::new(d).join("weave_map.json"));
+    let cache_ready = cache_file.as_ref().map(|f| f.exists()).unwrap_or(false);
+    let mut cache_map: HashMap<String, HashMap<String, Vec<u64>>> = cache_file
+        .as_ref()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if cache_ready {
+        println!(
+            "[eval] 命中编织缓存 (NYLON_EVAL_STORE_DIR, {} 个会话样本)，逐样本复用",
+            cache_map.len()
+        );
+    }
+    let store = PersistentGraph::open(&store_path).unwrap();
     let dims: usize = std::env::var("NYLON_EMBED_DIMS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -217,7 +247,7 @@ async fn locomo_evidence_recall() {
 
     let mut total = 0usize;
     let mut hit = 0usize;
-    let mut per_cat: HashMap<i64, (usize, usize, usize)> = HashMap::new(); // cat -> (total, hit, seed_hit)
+    let mut per_cat: HashMap<i64, (usize, usize, usize, usize)> = HashMap::new(); // cat -> (total, hit, seed_hit, all_hit)
     let mut seed_total_hit = 0usize;
     let mut total_turns = 0usize;
     // e2e QA 计数：cat -> (total, correct)
@@ -258,7 +288,13 @@ async fn locomo_evidence_recall() {
                 }
             }
         }
+        // 缓存按样本粒度判断：部分缓存（如前一次只跑了 LIMIT=1）只复用已织样本，
+        // 未命中样本照常织入并增量落盘
+        let sample_cached = cache_map.contains_key(&sample);
         for sess in sessions {
+            if sample_cached {
+                break;
+            }
             let turns = conv_obj[sess].as_array().cloned().unwrap_or_default();
             // 时间锚定（NYLON_EVAL_DATE_ANCHOR=1）：叶子文本前挂会话日期。
             // 时序推理题（Cat2）的金答案大多是日期，没有日期上下文根本不可答。
@@ -342,7 +378,16 @@ async fn locomo_evidence_recall() {
             .await;
         }
 
-        if session_weave && std::env::var("NYLON_WORLD_BRIDGES_ASYNC").is_ok() {
+        if sample_cached {
+            dia2nodes = cache_map.get(&sample).cloned().unwrap_or_default();
+            println!("[eval] {sample} 复用缓存编织：{} 个 dia 映射", dia2nodes.len());
+        } else if let Some(f) = &cache_file {
+            cache_map.insert(sample.clone(), dia2nodes.clone());
+            std::fs::write(f, serde_json::to_string(&cache_map).unwrap())
+                .expect("写编织缓存失败");
+        }
+
+        if !sample_cached && session_weave && std::env::var("NYLON_WORLD_BRIDGES_ASYNC").is_ok() {
             let wait_secs = std::env::var("NYLON_REFLECT_WAIT_SECS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -363,12 +408,17 @@ async fn locomo_evidence_recall() {
                     continue;
                 }
             }
+            // 证据 ID 兼容：少数条目把多个 dia_id 用分号挤在一个字符串里
+            // （如 "D8:6; D9:17"），不拆开会导致映射查找永远落空（2026-09-18 发现）。
             let evidence: Vec<String> = qa["evidence"]
                 .as_array()
                 .cloned()
                 .unwrap_or_default()
                 .iter()
-                .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                .filter_map(|e| e.as_str())
+                .flat_map(|s| s.split(';'))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect();
             if evidence.is_empty() {
                 continue;
@@ -422,6 +472,71 @@ async fn locomo_evidence_recall() {
                 Some(v) => std::env::set_var("NYLON_RERANK_VEC", v),
                 None => std::env::remove_var("NYLON_RERANK_VEC"),
             }
+            // 伪相关反馈第二轮检索（NYLON_CAT{n}_PRF=1）：多跳题的第一跳往往
+            // 只带回"半条证据链"，用首轮 Top-5 事实反哺查询再检一轮，按最高分合并，
+            // 让第二跳证据进入候选。查询侧机制，不改编织。
+            let resp = if std::env::var(format!("NYLON_CAT{cat}_PRF")).is_ok() {
+                let fb: String = resp
+                    .activated
+                    .iter()
+                    .take(5)
+                    .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
+                    .map(|f| f.chars().take(200).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if fb.is_empty() {
+                    resp
+                } else {
+                    let q2 = format!("{expanded} {fb}");
+                    let resp2 = rpc_with_retry("resonate-prf", || {
+                        let mut c = client.clone();
+                        let owner = sample.clone();
+                        let query = q2.clone();
+                        async move {
+                            c.resonate(ResonateRequest {
+                                tenant_id: "locomo".into(),
+                                owner_id: owner,
+                                query,
+                                context: cat_hops(cat).map(|h| ContextSpectrum {
+                                    task: None,
+                                    emotion_valence: None,
+                                    device: None,
+                                    max_hops: Some(h),
+                                }),
+                                budget: std::env::var("NYLON_BUDGET")
+                                    .ok()
+                                    .and_then(|v| v.parse().ok())
+                                    .unwrap_or(32),
+                            })
+                            .await
+                        }
+                    })
+                    .await;
+                    // 合并两轮：同一节点取最高分，按分降序重排
+                    let mut best: HashMap<u64, ActivatedNode> = HashMap::new();
+                    for a in resp
+                        .activated
+                        .into_iter()
+                        .chain(resp2.activated.into_iter())
+                    {
+                        best.entry(a.node_id)
+                            .and_modify(|old| {
+                                if a.resonance > old.resonance {
+                                    old.resonance = a.resonance;
+                                }
+                            })
+                            .or_insert(a);
+                    }
+                    let mut merged: Vec<ActivatedNode> = best.into_values().collect();
+                    merged.sort_by(|a, b| b.resonance.total_cmp(&a.resonance));
+                    ResonateResponse {
+                        activated: merged,
+                        seed_ids: resp.seed_ids,
+                    }
+                }
+            } else {
+                resp
+            };
             let got: Vec<u64> = resp
                 .activated
                 .iter()
@@ -434,6 +549,15 @@ async fn locomo_evidence_recall() {
                     .map(|ns| ns.iter().any(|n| got.contains(n)))
                     .unwrap_or(false)
             });
+            // 全证据命中：多跳题需要"每一跳"都在 Top-K 才可答，
+            // any-hit 会高估多跳题的可答性（2026-09-18 提分专项新增观测口径）
+            let all_hit = !evidence.is_empty()
+                && evidence.iter().all(|e| {
+                    dia2nodes
+                        .get(e)
+                        .map(|ns| ns.iter().any(|n| got.contains(n)))
+                        .unwrap_or(false)
+                });
             // 种子层召回：证据是否直接进入种子集（不扩散的理论上限）
             let seed_hit = evidence.iter().any(|e| {
                 dia2nodes
@@ -448,13 +572,16 @@ async fn locomo_evidence_recall() {
             if seed_hit {
                 seed_total_hit += 1;
             }
-            let entry = per_cat.entry(cat).or_insert((0, 0, 0));
+            let entry = per_cat.entry(cat).or_insert((0, 0, 0, 0));
             entry.0 += 1;
             if ok {
                 entry.1 += 1;
             }
             if seed_hit {
                 entry.2 += 1;
+            }
+            if all_hit {
+                entry.3 += 1;
             }
             // e2e：top-10 检索内容 → LLM 作答 → 裁判判定语义正确性
             if e2e {
@@ -584,11 +711,12 @@ async fn locomo_evidence_recall() {
     );
     let mut cats: Vec<_> = per_cat.iter().map(|(c, v)| (*c, *v)).collect();
     cats.sort_by_key(|(c, _)| *c);
-    for (cat, (t, h, sh)) in &cats {
+    for (cat, (t, h, sh, ah)) in &cats {
         println!(
-            "  category {cat}: 最终 {h}/{t} = {:.1}% | 种子 {sh}/{t} = {:.1}%",
+            "  category {cat}: 最终 {h}/{t} = {:.1}% | 种子 {sh}/{t} = {:.1}% | 全证据 {ah}/{t} = {:.1}%",
             *h as f64 / *t as f64 * 100.0,
-            *sh as f64 / *t as f64 * 100.0
+            *sh as f64 / *t as f64 * 100.0,
+            *ah as f64 / *t as f64 * 100.0
         );
     }
     if e2e && qa_total > 0 {
