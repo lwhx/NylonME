@@ -1708,7 +1708,10 @@ impl MemoryEngine for EngineService {
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
                 .unwrap_or(0.5);
-            if out.is_empty() || top < min_score {
+            // NYLON_FAILURE_LOG_ALL=1：全量记录（离线调阈值/分析用）；
+            // 否则只记失败嫌疑：无种子、零命中、或 top 张力低于阈值。
+            let log_all = std::env::var("NYLON_FAILURE_LOG_ALL").is_ok();
+            if log_all || seeds.is_empty() || out.is_empty() || top < min_score {
                 let esc = |s: &str| {
                     s.replace('\\', "\\\\")
                         .replace('"', "\\\"")
