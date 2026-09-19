@@ -152,6 +152,14 @@ async fn locomo_evidence_recall() {
     let dump_cat: Option<i64> = std::env::var("NYLON_EVAL_DUMP_CAT")
         .ok()
         .and_then(|v| v.parse().ok());
+    // 推断附赠通道（NYLON_EVAL_INFER_BONUS=N，仅评测）：作答上下文 = 前 10 条**非推断**
+    // 节点 + 末尾追加最多 N 条推断节点（前缀 [inferred] 供作答模型校准）。
+    // 推断不占证据名额（recall-J 背离的解法：57.6 vs 63.0 的挤出不该发生）。
+    // recall@10 统计口径不变（got 仍取原始前 10）。
+    let infer_bonus: usize = std::env::var("NYLON_EVAL_INFER_BONUS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let data: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("读取数据集失败"))
             .expect("解析 JSON 失败");
@@ -662,7 +670,12 @@ async fn locomo_evidence_recall() {
                 if gold.trim().is_empty() {
                     continue; // 数据集中少数条目无金答案，无法判定，不计入
                 }
-                let ctx_text = resp
+                let is_inferred = |a: &ActivatedNode| {
+                    a.filaments
+                        .as_ref()
+                        .is_some_and(|f| f.relations.iter().any(|r| r == "inferred"))
+                };
+                let mut ctx_items: Vec<String> = resp
                     .activated
                     .iter()
                     // 机制验证（NYLON_EVAL_CAT2_NO_PERSONA=1）：时序题作答上下文剔除画像节点。
@@ -676,10 +689,25 @@ async fn locomo_evidence_recall() {
                                 .as_ref()
                                 .is_some_and(|f| f.relations.iter().any(|r| r == "persona")))
                     })
+                    // 附赠通道开启时推断不占 Top-10 证据名额，名额由后续证据补位
+                    .filter(|a| !(infer_bonus > 0 && is_inferred(a)))
                     .take(RECALL_K)
                     .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .collect();
+                if infer_bonus > 0 {
+                    ctx_items.extend(
+                        resp.activated
+                            .iter()
+                            .filter(|a| is_inferred(a))
+                            .take(infer_bonus)
+                            .filter_map(|a| {
+                                a.filaments
+                                    .as_ref()
+                                    .map(|f| format!("[inferred] {}", f.fact))
+                            }),
+                    );
+                }
+                let ctx_text = ctx_items.join("\n");
                 let candidate = answer_with_context(qa_llm.as_deref(), &ctx_text, question).await;
                 // 双裁判：论文口径（Mem0 Appendix A，从宽，对外可比）+ 内部严格口径（从严，看真实质量）
                 let (correct, correct_strict) = match &candidate {
