@@ -128,6 +128,28 @@ class GetNodeResponse(_message.Message):
     current_tension: float
     def __init__(self, node_id: _Optional[int] = ..., filaments: _Optional[_Union[Filaments, _Mapping]] = ..., current_tension: _Optional[float] = ...) -> None: ...
 
+class FeedbackRequest(_message.Message):
+    __slots__ = ("tenant_id", "owner_id", "query", "rating", "comment", "shown_node_ids")
+    TENANT_ID_FIELD_NUMBER: _ClassVar[int]
+    OWNER_ID_FIELD_NUMBER: _ClassVar[int]
+    QUERY_FIELD_NUMBER: _ClassVar[int]
+    RATING_FIELD_NUMBER: _ClassVar[int]
+    COMMENT_FIELD_NUMBER: _ClassVar[int]
+    SHOWN_NODE_IDS_FIELD_NUMBER: _ClassVar[int]
+    tenant_id: str
+    owner_id: str
+    query: str
+    rating: str
+    comment: str
+    shown_node_ids: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, tenant_id: _Optional[str] = ..., owner_id: _Optional[str] = ..., query: _Optional[str] = ..., rating: _Optional[str] = ..., comment: _Optional[str] = ..., shown_node_ids: _Optional[_Iterable[int]] = ...) -> None: ...
+
+class FeedbackResponse(_message.Message):
+    __slots__ = ("recorded",)
+    RECORDED_FIELD_NUMBER: _ClassVar[int]
+    recorded: bool
+    def __init__(self, recorded: _Optional[bool] = ...) -> None: ...
+
 class SessionEvent(_message.Message):
     __slots__ = ("event_id", "speaker", "text")
     EVENT_ID_FIELD_NUMBER: _ClassVar[int]

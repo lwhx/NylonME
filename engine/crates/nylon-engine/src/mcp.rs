@@ -85,6 +85,13 @@ impl pb::memory_engine_server::MemoryEngine for RemoteEngine {
     ) -> Result<tonic::Response<pb::GetNodeResponse>, tonic::Status> {
         self.client.clone().get_node(self.sign(req)).await
     }
+
+    async fn report_feedback(
+        &self,
+        req: tonic::Request<pb::FeedbackRequest>,
+    ) -> Result<tonic::Response<pb::FeedbackResponse>, tonic::Status> {
+        self.client.clone().report_feedback(self.sign(req)).await
+    }
 }
 
 #[derive(Clone)]
@@ -120,6 +127,18 @@ pub struct ResonateArgs {
 pub struct GetArgs {
     /// 节点 ID（resonate 返回的第一列）
     pub node_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FeedbackArgs {
+    /// 当时没答好的原始查询（用户问了什么）
+    pub query: String,
+    /// 失败类型：down（差评/没答到点上）| wrong（答错了）| insufficient（记忆信息不足）。默认 down
+    pub rating: Option<String>,
+    /// 可选补充：正确答案是什么/缺什么信息（帮助引擎定向反思）
+    pub comment: Option<String>,
+    /// 记忆归属（项目或用户 slug），缺省用环境变量 NYLON_OWNER 或 "default"
+    pub owner: Option<String>,
 }
 
 #[tool_router]
@@ -221,6 +240,35 @@ impl NylonMcp {
             .map(|f| f.fact)
             .unwrap_or_else(|| "(节点不存在)".into());
         Ok(CallToolResult::success(vec![ContentBlock::text(fact)]))
+    }
+
+    #[tool(
+        description = "报告一次基于记忆的失败回答（差评/答错/信息不足）。引擎会持久化记录，并在空闲反思时针对该失败定向补全推断。当你发现记忆检索没帮上忙或答错时主动调用。"
+    )]
+    async fn memory_feedback(
+        &self,
+        Parameters(args): Parameters<FeedbackArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = pb::FeedbackRequest {
+            tenant_id: self.tenant.clone(),
+            owner_id: args
+                .owner
+                .clone()
+                .unwrap_or_else(|| self.default_owner.clone()),
+            query: args.query,
+            rating: args.rating.unwrap_or_else(|| "down".into()),
+            comment: args.comment.unwrap_or_default(),
+            shown_node_ids: Vec::new(),
+        };
+        pb::memory_engine_server::MemoryEngine::report_feedback(
+            &*self.svc,
+            tonic::Request::new(req),
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e.message().to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "已记录。引擎将在空闲反思时针对该失败定向补全（feedback-driven reflection）。",
+        )]))
     }
 }
 

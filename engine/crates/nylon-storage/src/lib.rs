@@ -48,6 +48,11 @@ impl PersistentGraph {
         &self.graph
     }
 
+    /// 数据目录（反馈日志等附属文件的落盘位置）。
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// 写入节点（WAL 先行入队），返回分片内局部 ID 与持久化票据。
     pub fn add_node(&mut self, node: MemoryNode) -> io::Result<(u32, DurabilityTicket)> {
         let local = self.graph.peek_next_local_id();

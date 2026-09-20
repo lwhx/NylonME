@@ -28,7 +28,8 @@ pub mod pb {
 
 use pb::memory_engine_server::MemoryEngine;
 use pb::{
-    ActivatedNode, EventNode, FactNode, GetNodeRequest, GetNodeResponse, ResonateRequest,
+    ActivatedNode, EventNode, FactNode, FeedbackRequest, FeedbackResponse, GetNodeRequest,
+    GetNodeResponse, ResonateRequest,
     ResonateResponse, SearchRequest, SearchResponse, SessionEvent, WeaveRequest, WeaveResponse,
     WeaveSessionRequest, WeaveSessionResponse,
 };
@@ -167,12 +168,138 @@ struct ReflectionJob {
     leaf_ids: Vec<u32>,
 }
 
+/// 回答质量回执（反馈驱动反思的输入信号）。
+/// 持久化到 <store>/feedback.jsonl，反思 worker 空闲时定向补推断。
+#[derive(Clone)]
+pub struct FeedbackRecord {
+    pub tenant_id: String,
+    pub owner_id: String,
+    pub query: String,
+    pub rating: String,
+    pub comment: String,
+    pub shown_node_ids: Vec<u32>,
+    pub ts: i64,
+}
+
+impl FeedbackRecord {
+    /// 去重键：同一 owner 对同一查询的重复回执只反思一次。
+    fn dedup_key(&self) -> String {
+        format!("{}|{}|{}", self.tenant_id, self.owner_id, self.query)
+    }
+}
+
+/// 反思 worker 的工作项：会话反思（定期）或失败回执（反馈驱动）。
+enum ReflectWork {
+    Session(ReflectionJob),
+    Feedback(FeedbackRecord),
+}
+
+// ---------- 反馈回执的持久化（feedback.jsonl 追加写 + processed 标记防重） ----------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FeedbackLogLine {
+    ts: i64,
+    tenant: String,
+    owner: String,
+    query: String,
+    rating: String,
+    #[serde(default)]
+    comment: String,
+    #[serde(default)]
+    shown: Vec<u32>,
+}
+
+impl From<&FeedbackRecord> for FeedbackLogLine {
+    fn from(r: &FeedbackRecord) -> Self {
+        FeedbackLogLine {
+            ts: r.ts,
+            tenant: r.tenant_id.clone(),
+            owner: r.owner_id.clone(),
+            query: r.query.clone(),
+            rating: r.rating.clone(),
+            comment: r.comment.clone(),
+            shown: r.shown_node_ids.clone(),
+        }
+    }
+}
+
+impl From<FeedbackLogLine> for FeedbackRecord {
+    fn from(l: FeedbackLogLine) -> Self {
+        FeedbackRecord {
+            tenant_id: l.tenant,
+            owner_id: l.owner,
+            query: l.query,
+            rating: l.rating,
+            comment: l.comment,
+            shown_node_ids: l.shown,
+            ts: l.ts,
+        }
+    }
+}
+
+fn feedback_log_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("feedback.jsonl")
+}
+
+fn feedback_processed_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("feedback-processed.jsonl")
+}
+
+/// 追加一条回执到 feedback.jsonl（先落盘后入队，崩溃不丢）。
+fn append_feedback_log(dir: &std::path::Path, rec: &FeedbackRecord) -> Result<(), Status> {
+    let line = serde_json::to_string(&FeedbackLogLine::from(rec))
+        .map_err(|e| Status::internal(format!("反馈序列化失败: {e}")))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(feedback_log_path(dir))
+        .map_err(|e| Status::internal(format!("反馈日志打开失败: {e}")))?;
+    use std::io::Write;
+    f.write_all(line.as_bytes())
+        .and_then(|_| f.write_all(b"\n"))
+        .map_err(|e| Status::internal(format!("反馈日志写入失败: {e}")))
+}
+
+fn load_processed_keys(dir: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(feedback_processed_path(dir))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<String>(l).ok())
+        .collect()
+}
+
+fn mark_feedback_processed(dir: &std::path::Path, key: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(feedback_processed_path(dir))
+    {
+        use std::io::Write;
+        if let Ok(line) = serde_json::to_string(&key.to_string()) {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+    }
+}
+
+/// 启动回放：feedback.jsonl 中尚未处理的回执（按去重键过滤）。
+fn load_unprocessed_feedback(dir: &std::path::Path) -> Vec<FeedbackRecord> {
+    let processed = load_processed_keys(dir);
+    std::fs::read_to_string(feedback_log_path(dir))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<FeedbackLogLine>(l).ok())
+        .map(FeedbackRecord::from)
+        .filter(|r| !processed.contains(&r.dedup_key()))
+        .collect()
+}
+
 /// MemoryEngine 服务句柄（内部状态互斥保护，Phase 1 单写者够用）。
 #[derive(Clone)]
 pub struct EngineService {
     inner: Arc<Mutex<Inner>>,
     /// 空闲反思队列：异步补常识桥接节点。
-    reflect_tx: Option<tokio::sync::mpsc::UnboundedSender<ReflectionJob>>,
+    reflect_tx: Option<tokio::sync::mpsc::UnboundedSender<ReflectWork>>,
     /// 嵌入通道：None 时退回 Phase 1 行为（无向量写入、无向量种子）。
     embedder: Option<Arc<dyn Embedder>>,
     /// LLM 通道：None 时关闭编织分解与冲突检测。
@@ -209,22 +336,25 @@ impl EngineService {
         }
         let inner = Arc::new(Mutex::new(Inner { store, index }));
         let reflect_tx = llm.clone().map(|llm| {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReflectionJob>();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReflectWork>();
             let inner = Arc::clone(&inner);
             let embedder = embedder.clone();
             tokio::spawn(async move {
-                let mut pending: Vec<ReflectionJob> = Vec::new();
+                let mut pending: Vec<ReflectWork> = Vec::new();
+                let mut feedback_done: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 loop {
                     match tokio::time::timeout(reflect_idle_duration(), rx.recv()).await {
                         Ok(Some(job)) => pending.push(job),
                         Ok(None) => {
                             if !pending.is_empty() {
                                 let jobs = std::mem::take(&mut pending);
-                                process_reflection_jobs(
+                                process_reflect_work(
                                     &inner,
                                     embedder.as_ref(),
                                     llm.as_ref(),
                                     jobs,
+                                    &mut feedback_done,
                                 )
                                 .await;
                             }
@@ -233,11 +363,12 @@ impl EngineService {
                         Err(_) => {
                             if !pending.is_empty() {
                                 let jobs = std::mem::take(&mut pending);
-                                process_reflection_jobs(
+                                process_reflect_work(
                                     &inner,
                                     embedder.as_ref(),
                                     llm.as_ref(),
                                     jobs,
+                                    &mut feedback_done,
                                 )
                                 .await;
                             }
@@ -247,6 +378,19 @@ impl EngineService {
             });
             tx
         });
+        // 启动时回放未处理的反馈回执：崩溃/重启不丢失败信号（反馈驱动反思）
+        if let Some(tx) = &reflect_tx {
+            let dir = inner.lock().ok().map(|i| i.store.dir().to_path_buf());
+            if let Some(dir) = dir {
+                let backlog = load_unprocessed_feedback(&dir);
+                if !backlog.is_empty() {
+                    eprintln!("[reflect] 回放未处理反馈回执 {} 条", backlog.len());
+                    for rec in backlog {
+                        let _ = tx.send(ReflectWork::Feedback(rec));
+                    }
+                }
+            }
+        }
         EngineService {
             inner,
             embedder,
@@ -778,6 +922,158 @@ async fn extract_personal_inferences(llm: &dyn ChatModel, session_text: &str) ->
             Vec::new()
         }
     }
+}
+
+/// 反思 worker 的统一入口：会话反思 + 反馈驱动反思（失败回执）。
+/// 反馈消费受 NYLON_FEEDBACK_REFLECT=1 控制（记录不受开关影响，已在 API 层落盘）。
+async fn process_reflect_work(
+    inner: &Arc<Mutex<Inner>>,
+    embedder: Option<&Arc<dyn Embedder>>,
+    llm: &dyn ChatModel,
+    items: Vec<ReflectWork>,
+    feedback_done: &mut std::collections::HashSet<String>,
+) {
+    let mut sessions = Vec::new();
+    let mut feedbacks = Vec::new();
+    for item in items {
+        match item {
+            ReflectWork::Session(j) => sessions.push(j),
+            ReflectWork::Feedback(f) => {
+                // 运行期去重：同一 owner 对同一查询的重复回执只反思一次
+                if feedback_done.insert(f.dedup_key()) {
+                    feedbacks.push(f);
+                }
+            }
+        }
+    }
+    if !sessions.is_empty() {
+        process_reflection_jobs(inner, embedder, llm, sessions).await;
+    }
+    if std::env::var("NYLON_FEEDBACK_REFLECT").is_ok() {
+        for rec in feedbacks {
+            process_feedback(inner, embedder, llm, &rec).await;
+        }
+    }
+}
+
+/// 反馈驱动反思：针对一次失败回答，诊断"缺连接还是缺信息"，
+/// 缺连接则补 1-2 条个人化推断节点（可进作答上下文）；缺信息则什么都不写——
+/// 反思必须学会"无话可说"，否则变成幻觉注水。
+async fn process_feedback(
+    inner: &Arc<Mutex<Inner>>,
+    embedder: Option<&Arc<dyn Embedder>>,
+    llm: &dyn ChatModel,
+    rec: &FeedbackRecord,
+) {
+    let dir = inner.lock().ok().map(|i| i.store.dir().to_path_buf());
+    let Some(dir) = dir else { return };
+
+    // 1. 失败上下文：优先客户端回传的展示节点；否则用查询向量取 top-32 近邻
+    let mut ctx_ids: Vec<u32> = rec.shown_node_ids.clone();
+    if ctx_ids.is_empty() {
+        let Some(emb) = embedder else {
+            mark_feedback_processed(&dir, &rec.dedup_key());
+            return;
+        };
+        match emb.embed(std::slice::from_ref(&rec.query)).await {
+            Ok(v) => {
+                if let Some(qv) = v.into_iter().next() {
+                    if let Ok(g) = inner.lock() {
+                        ctx_ids = g
+                            .index
+                            .search(&qv, 32)
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect();
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[reflect] 反馈上下文嵌入失败（下轮重试）: {e}");
+                return; // 瞬时错误不打 processed 标记，重启后重试
+            }
+        }
+    }
+    // 2. 收集上下文事实（限本租户；排除世界知识桥——只给用户可见的记忆）
+    let (ctx_ids, ctx_facts): (Vec<u32>, Vec<String>) = {
+        let Ok(g) = inner.lock() else { return };
+        let mut ids = Vec::new();
+        let mut facts = Vec::new();
+        for id in ctx_ids {
+            if let Some(n) = g.store.graph().get_node(id) {
+                if n.tenant_id == rec.tenant_id
+                    && !n.filaments.relations.iter().any(|r| r == WORLD_KNOWLEDGE_TAG)
+                {
+                    ids.push(id);
+                    facts.push(n.filaments.fact.clone());
+                }
+            }
+        }
+        (ids, facts)
+    };
+    if ctx_facts.is_empty() {
+        // 记忆里确实什么都没有——缺信息而非缺连接，无话可说，标记完成
+        mark_feedback_processed(&dir, &rec.dedup_key());
+        return;
+    }
+    // 3. LLM 诊断 + 定向推断
+    let numbered = ctx_facts
+        .iter()
+        .enumerate()
+        .map(|(i, f)| format!("{}. {}", i + 1, f))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let system = "You are a memory self-repair reasoner. A user asked the memory system a question and reported the answer as unsatisfactory. You are given the memories the system had retrieved. Decide: (a) the retrieved memories DO contain relevant facts, but an unstated connection or inference is missing — then write 1-2 personalized inference statements (naming the people involved, self-contained, phrased as careful inference) that would let a future retrieval answer the question; or (b) the information is simply absent from the memories — then output an empty list (do NOT invent facts not supported by the memories). Output ONLY valid JSON: {\"inferences\": [\"...\", ...]}.";
+    let prompt = format!(
+        "Question: {}\nReported problem: {} {}\n\nRetrieved memories:\n{}",
+        rec.query,
+        rec.rating,
+        if rec.comment.is_empty() {
+            String::new()
+        } else {
+            format!("({})", rec.comment)
+        },
+        numbered
+    );
+    let inferences = match llm.chat_json(system, &prompt).await {
+        Ok(v) => v
+            .get("inferences")
+            .and_then(|b| b.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .take(2)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[reflect] 反馈反思 LLM 失败（下轮重试）: {e}");
+            return; // 瞬时错误不打标记
+        }
+    };
+    // 4. 写回推断节点（边连失败上下文，下次同类查询可被种子/扩散命中）
+    let mut wrote = 0usize;
+    for inf in inferences {
+        match write_personal_inference(
+            inner,
+            embedder,
+            &rec.tenant_id,
+            &rec.owner_id,
+            &ctx_ids,
+            inf,
+        )
+        .await
+        {
+            Ok(()) => wrote += 1,
+            Err(e) => eprintln!("[reflect] 反馈推断写入失败: {e}"),
+        }
+    }
+    eprintln!(
+        "[reflect] 反馈驱动反思 tenant={} owner={} rating={} 补推断 {} 个 :: {:.60}",
+        rec.tenant_id, rec.owner_id, rec.rating, wrote, rec.query
+    );
+    mark_feedback_processed(&dir, &rec.dedup_key());
 }
 
 async fn process_reflection_jobs(
@@ -1399,7 +1695,7 @@ impl MemoryEngine for EngineService {
                             fact_ids: fact_nodes.iter().map(|f| f.node_id as u32).collect(),
                             leaf_ids: leaf_nodes.iter().map(|l| l.node_id as u32).collect(),
                         };
-                        if tx.send(job).is_err() {
+                        if tx.send(ReflectWork::Session(job)).is_err() {
                             eprintln!("[weave_session] reflection worker 已关闭，跳过异步常识桥接");
                         }
                     }
@@ -1858,6 +2154,58 @@ impl MemoryEngine for EngineService {
             current_tension: tension,
         }))
     }
+
+    /// 回答质量回执（反馈驱动反思入口）：持久化到 feedback.jsonl（先落盘），
+    /// 再入队反思 worker；worker 空闲时对失败簇定向补个人化推断。
+    /// 记录行为不受 NYLON_FEEDBACK_REFLECT 影响（开关只管 LLM 消费）。
+    async fn report_feedback(
+        &self,
+        req: Request<FeedbackRequest>,
+    ) -> Result<Response<FeedbackResponse>, Status> {
+        let grant = req.extensions().get::<KeyGrant>().cloned();
+        let r = req.into_inner();
+        self.check(
+            grant.as_ref(),
+            Scope::Write,
+            &r.tenant_id,
+            "report_feedback",
+            &r.owner_id,
+        )?;
+        if r.tenant_id.is_empty() || r.owner_id.is_empty() || r.query.is_empty() {
+            return Err(Status::invalid_argument("tenant_id / owner_id / query 不能为空"));
+        }
+        let rec = FeedbackRecord {
+            tenant_id: r.tenant_id.clone(),
+            owner_id: r.owner_id.clone(),
+            query: r.query.clone(),
+            rating: if r.rating.is_empty() {
+                "down".to_string()
+            } else {
+                r.rating.clone()
+            },
+            comment: r.comment.clone(),
+            shown_node_ids: r.shown_node_ids.iter().map(|&v| v as u32).collect(),
+            ts: now_secs(),
+        };
+        let dir = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| Status::internal("state lock poisoned"))?;
+            inner.store.dir().to_path_buf()
+        };
+        append_feedback_log(&dir, &rec)?;
+        if let Some(tx) = &self.reflect_tx {
+            let _ = tx.send(ReflectWork::Feedback(rec.clone()));
+        }
+        self.audit_op(
+            "report_feedback",
+            &rec.tenant_id,
+            &rec.owner_id,
+            format!("rating={} query={:.60}", rec.rating, rec.query),
+        );
+        Ok(Response::new(FeedbackResponse { recorded: true }))
+    }
 }
 
 #[cfg(test)]
@@ -1888,6 +2236,70 @@ mod tests {
             .await
             .unwrap();
         resp.into_inner().node_id
+    }
+
+    /// 反馈驱动反思全链路：回执落盘 → 空闲 worker 消费 → inferred 推断节点生成。
+    #[tokio::test]
+    async fn feedback_recorded_and_reflected_to_inference_node() {
+        std::env::set_var("NYLON_FEEDBACK_REFLECT", "1");
+        std::env::set_var("NYLON_REFLECT_IDLE_SECS", "1");
+        let canned = serde_json::json!({
+            "inferences": ["Alice likely prefers window seats because she works on long flights."]
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentGraph::open(dir.path()).unwrap();
+        let embedder = Arc::new(StubEmbedder::new(64));
+        let llm = Arc::new(StubChatModel::new(canned));
+        let svc = EngineService::new(store, 64, Some(embedder), Some(llm));
+
+        svc.weave(Request::new(WeaveRequest {
+            tenant_id: "fb-test".into(),
+            owner_id: "alice".into(),
+            raw_event: "Alice prefers window seats".into(),
+            context: None,
+        }))
+        .await
+        .unwrap();
+
+        let resp = svc
+            .report_feedback(Request::new(FeedbackRequest {
+                tenant_id: "fb-test".into(),
+                owner_id: "alice".into(),
+                query: "Which seat does Alice like?".into(),
+                rating: "down".into(),
+                comment: String::new(),
+                shown_node_ids: Vec::new(),
+            }))
+            .await
+            .unwrap();
+        assert!(resp.into_inner().recorded);
+        // 先落盘：feedback.jsonl 立即存在（崩溃不丢）
+        assert!(dir.path().join("feedback.jsonl").exists());
+
+        // 等空闲反思（1s 空闲触发）写出推断节点 + processed 标记
+        // （标记在节点之后落盘，两者必须一起等，否则竞态抖动）
+        let mut found = false;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let hit = {
+                let inner = svc.inner.lock().unwrap();
+                let mut any_inferred = false;
+                for (_, n) in inner.store.graph().live_nodes() {
+                    if n.filaments.relations.iter().any(|r| r == INFERRED_TAG) {
+                        any_inferred = true;
+                        break;
+                    }
+                }
+                any_inferred
+            };
+            if hit && dir.path().join("feedback-processed.jsonl").exists() {
+                found = true;
+                break;
+            }
+        }
+        std::env::remove_var("NYLON_FEEDBACK_REFLECT");
+        std::env::remove_var("NYLON_REFLECT_IDLE_SECS");
+        assert!(found, "反馈反思应生成 inferred 推断节点");
     }
 
     #[tokio::test]
