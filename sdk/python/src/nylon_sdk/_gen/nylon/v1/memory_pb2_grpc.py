@@ -60,6 +60,11 @@ class MemoryEngineStub:
                 request_serializer=nylon_dot_v1_dot_memory__pb2.GetNodeRequest.SerializeToString,
                 response_deserializer=nylon_dot_v1_dot_memory__pb2.GetNodeResponse.FromString,
                 _registered_method=True)
+        self.ReportFeedback = channel.unary_unary(
+                '/nylon.v1.MemoryEngine/ReportFeedback',
+                request_serializer=nylon_dot_v1_dot_memory__pb2.FeedbackRequest.SerializeToString,
+                response_deserializer=nylon_dot_v1_dot_memory__pb2.FeedbackResponse.FromString,
+                _registered_method=True)
 
 
 class MemoryEngineServicer:
@@ -101,6 +106,14 @@ class MemoryEngineServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReportFeedback(self, request, context):
+        """回答质量回执：客户端报告某次检索/作答的失败（差评/答错/信息不足），
+        引擎持久化记录，并在空闲反思时针对失败簇定向补推断（反馈驱动反思）。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MemoryEngineServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -128,6 +141,11 @@ def add_MemoryEngineServicer_to_server(servicer, server):
                     servicer.GetNode,
                     request_deserializer=nylon_dot_v1_dot_memory__pb2.GetNodeRequest.FromString,
                     response_serializer=nylon_dot_v1_dot_memory__pb2.GetNodeResponse.SerializeToString,
+            ),
+            'ReportFeedback': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportFeedback,
+                    request_deserializer=nylon_dot_v1_dot_memory__pb2.FeedbackRequest.FromString,
+                    response_serializer=nylon_dot_v1_dot_memory__pb2.FeedbackResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -266,6 +284,33 @@ class MemoryEngine:
             '/nylon.v1.MemoryEngine/GetNode',
             nylon_dot_v1_dot_memory__pb2.GetNodeRequest.SerializeToString,
             nylon_dot_v1_dot_memory__pb2.GetNodeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReportFeedback(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nylon.v1.MemoryEngine/ReportFeedback',
+            nylon_dot_v1_dot_memory__pb2.FeedbackRequest.SerializeToString,
+            nylon_dot_v1_dot_memory__pb2.FeedbackResponse.FromString,
             options,
             channel_credentials,
             insecure,

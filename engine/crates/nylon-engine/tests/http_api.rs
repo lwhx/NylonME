@@ -30,6 +30,42 @@ async fn call(app: &axum::Router, req: Request<Body>) -> (StatusCode, Value) {
     (status, body)
 }
 
+/// 回答质量回执端点：记录成功 + 落盘持久化 + 参数校验。
+#[tokio::test]
+async fn rest_feedback_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = http::router(test_svc(dir.path()));
+
+    let (s, b) = call(
+        &app,
+        Request::post("/v1/feedback")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"owner_id": "alice", "query": "Which seat does Alice like?", "rating": "wrong", "comment": "she said window"}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["recorded"], true);
+    // 先落盘再入队：feedback.jsonl 立即存在且含该查询
+    let log = std::fs::read_to_string(dir.path().join("feedback.jsonl")).unwrap();
+    assert!(log.contains("Which seat does Alice like?"));
+
+    // 参数校验：空 query 拒绝
+    let (s, _b) = call(
+        &app,
+        Request::post("/v1/feedback")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"owner_id": "alice", "query": ""}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn rest_weave_list_get_resonate_roundtrip() {
     let dir = tempfile::tempdir().unwrap();

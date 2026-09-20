@@ -16,6 +16,9 @@ service MemoryEngine {
   rpc Search(SearchRequest) returns (SearchResponse);
   // 读取单节点（含实时张力）
   rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  // 回答质量回执：客户端报告某次检索/作答的失败（差评/答错/信息不足），
+  // 引擎持久化记录，并在空闲反思时针对失败簇定向补推断（反馈驱动反思）。
+  rpc ReportFeedback(FeedbackRequest) returns (FeedbackResponse);
 }
 
 // 记忆丝（对应《尼龙记忆模型》2.2 节）
@@ -89,6 +92,20 @@ message GetNodeResponse {
   uint64 node_id = 1;
   Filaments filaments = 2;
   float current_tension = 3;
+}
+
+// 回答质量回执（反馈驱动反思的输入信号）
+message FeedbackRequest {
+  string tenant_id = 1;
+  string owner_id = 2;
+  string query = 3;                    // 当时没答好的原始查询
+  string rating = 4;                   // "down" | "wrong" | "insufficient"
+  string comment = 5;                  // 可选：用户补充说明（正确是什么/缺什么）
+  repeated uint64 shown_node_ids = 6;  // 可选：当时展示给用户的节点（帮助反思定位上下文）
+}
+
+message FeedbackResponse {
+  bool recorded = 1;
 }
 
 // Session 事件（双层写入的输入单元）

@@ -95,6 +95,16 @@ struct SearchBody {
 }
 
 #[derive(Deserialize)]
+struct FeedbackBody {
+    owner_id: String,
+    query: String,
+    rating: Option<String>,
+    comment: Option<String>,
+    shown_node_ids: Option<Vec<u64>>,
+    tenant_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ListQuery {
     tenant: Option<String>,
     owner: Option<String>,
@@ -455,6 +465,33 @@ async fn search(
     })))
 }
 
+/// 回答质量回执（反馈驱动反思入口）。
+async fn report_feedback(
+    State(svc): State<EngineService>,
+    headers: HeaderMap,
+    Json(b): Json<FeedbackBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant = b.tenant_id.clone().unwrap_or_else(|| DEFAULT_TENANT.into());
+    let grant =
+        http_authorize(svc.auth(), &headers, Scope::Write, Some(&tenant)).map_err(map_status)?;
+    let resp = svc
+        .report_feedback(signed_request(
+            grant,
+            pb::FeedbackRequest {
+                tenant_id: tenant,
+                owner_id: b.owner_id,
+                query: b.query,
+                rating: b.rating.unwrap_or_default(),
+                comment: b.comment.unwrap_or_default(),
+                shown_node_ids: b.shown_node_ids.unwrap_or_default(),
+            },
+        ))
+        .await
+        .map_err(map_status)?
+        .into_inner();
+    Ok(Json(serde_json::json!({ "recorded": resp.recorded })))
+}
+
 // ---------- 路由与启动 ----------
 
 pub fn router(svc: EngineService) -> Router {
@@ -478,6 +515,7 @@ pub fn router(svc: EngineService) -> Router {
         .route("/v1/weave_session", post(weave_session))
         .route("/v1/resonate", post(resonate))
         .route("/v1/search", post(search))
+        .route("/v1/feedback", post(report_feedback))
         .with_state(svc)
 }
 

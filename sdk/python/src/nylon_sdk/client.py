@@ -246,6 +246,32 @@ class NylonClient:
             current_tension=resp.current_tension,
         )
 
+    def feedback(
+        self,
+        query: str,
+        *,
+        rating: str = "down",
+        comment: str = "",
+        shown_node_ids: Optional[list] = None,
+    ) -> bool:
+        """回答质量回执：报告一次失败的记忆回答（down/wrong/insufficient）。
+
+        引擎持久化记录，并在空闲反思时针对失败簇定向补推断
+        （反馈驱动反思，需服务端 NYLON_FEEDBACK_REFLECT=1）。
+        """
+        resp = self._stub.ReportFeedback(
+            pb.FeedbackRequest(
+                tenant_id=self.tenant,
+                owner_id=self.owner,
+                query=query,
+                rating=rating,
+                comment=comment,
+                shown_node_ids=shown_node_ids or [],
+            ),
+            timeout=self.timeout,
+        )
+        return resp.recorded
+
 
 class AsyncNylonClient:
     """Async client built on grpc.aio. Use as an async context manager."""
@@ -361,3 +387,25 @@ class AsyncNylonClient:
             filaments=_filaments(resp.filaments),
             current_tension=resp.current_tension,
         )
+
+    async def feedback(
+        self,
+        query: str,
+        *,
+        rating: str = "down",
+        comment: str = "",
+        shown_node_ids: Optional[list] = None,
+    ) -> bool:
+        """回答质量回执（反馈驱动反思的输入信号），语义同同步版。"""
+        resp = await self._stub.ReportFeedback(
+            pb.FeedbackRequest(
+                tenant_id=self.tenant,
+                owner_id=self.owner,
+                query=query,
+                rating=rating,
+                comment=comment,
+                shown_node_ids=shown_node_ids or [],
+            ),
+            timeout=self.timeout,
+        )
+        return resp.recorded
