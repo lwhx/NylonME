@@ -29,9 +29,8 @@ pub mod pb {
 use pb::memory_engine_server::MemoryEngine;
 use pb::{
     ActivatedNode, EventNode, FactNode, FeedbackRequest, FeedbackResponse, GetNodeRequest,
-    GetNodeResponse, ResonateRequest,
-    ResonateResponse, SearchRequest, SearchResponse, SessionEvent, WeaveRequest, WeaveResponse,
-    WeaveSessionRequest, WeaveSessionResponse,
+    GetNodeResponse, ResonateRequest, ResonateResponse, SearchRequest, SearchResponse,
+    SessionEvent, WeaveRequest, WeaveResponse, WeaveSessionRequest, WeaveSessionResponse,
 };
 
 /// 默认嵌入维度（bge-small 类模型），可用 NYLON_EMBED_DIMS 覆盖。
@@ -839,44 +838,113 @@ impl EngineService {
     }
 }
 
+/// 会话拆分重试下限：批次 ≤ 该值不再对半拆分（issue #1 建议下限约 5 条事件）。
+const SESSION_SPLIT_FLOOR: usize = 5;
+
+/// Session 抽象事实抽取结果：facts + 全部（子）批次是否均 LLM 成功。
+struct SessionExtraction {
+    facts: Vec<(String, Vec<String>)>,
+    all_ok: bool,
+}
+
 /// Session 级抽象事实抽取（双层写入的理解层）：整段 session 一次 LLM 调用，
-/// 指代消解+原子事实+来源 event_id；失败返回空（调用方跳过抽象层）。
-async fn extract_session_facts(
-    llm: &dyn ChatModel,
-    session_text: &str,
-) -> Vec<(String, Vec<String>)> {
-    let system = "You are a memory extraction engine. Given a dialogue session with turn IDs, extract atomic factual memories worth remembering long-term. Resolve pronouns and partial names to canonical full names (e.g. 'she' -> the person's name). Merge duplicate information. Preserve exact details: dates, numbers, places, names. If turns carry a [date] prefix, treat it as the absolute time of those turns; when event timing matters, include the absolute date in the fact rather than relative words like 'yesterday' or 'last week'. Each fact must be self-contained. Output ONLY valid JSON: {\"facts\": [{\"fact\": \"...\", \"source\": [\"event_id\", ...]}]}. Skip greetings and small talk without facts.";
-    match llm.chat_json(system, session_text).await {
-        Ok(v) => v
-            .get("facts")
-            .and_then(|f| f.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|f| {
-                        let fact = f
-                            .get("fact")
-                            .and_then(|x| x.as_str())
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())?;
-                        let srcs: Vec<String> = f
-                            .get("source")
-                            .and_then(|v| v.as_array())
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        Some((fact, srcs))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+/// 指代消解+原子事实+来源 event_id。
+/// 失败处理（issue #1）：输出预算按输入规模自适应（1536 硬顶会截断 JSON）；
+/// 解析/调用失败时对半拆分递归重试；截断 JSON 由 llm 层抢救完整元素。
+async fn extract_session_facts(llm: &dyn ChatModel, lines: &[String]) -> SessionExtraction {
+    let system = "You are a memory extraction engine. Given a dialogue session with turn IDs, extract atomic factual memories worth remembering long-term. Resolve pronouns and partial names to canonical full names (e.g. 'she' -> the person's name). Merge duplicate information. Preserve exact details: dates, numbers, places, names. If turns carry a [date] prefix, treat it as the absolute time of those turns; when event timing matters, include the absolute date in the fact rather than relative words like 'yesterday' or 'last week'. Each fact must be self-contained. Extract at most 20 facts, each under 40 words. Output ONLY valid JSON: {\"facts\": [{\"fact\": \"...\", \"source\": [\"event_id\", ...]}]}. Skip greetings and small talk without facts.";
+    let text = lines.join("\n");
+    // 自适应输出预算：事实量随输入规模增长，预算钳制在 [2048, 8192]
+    let budget = (256 + text.len() / 20).clamp(2048, 8192) as u32;
+    match llm.chat_json_budget(system, &text, budget).await {
+        Ok(v) => SessionExtraction {
+            facts: parse_facts_value(&v),
+            all_ok: true,
+        },
         Err(e) => {
-            eprintln!("[weave_session] LLM session 分解失败，跳过抽象层: {e}");
-            Vec::new()
+            if lines.len() > SESSION_SPLIT_FLOOR {
+                // 长批次失败大概率是输出截断：对半拆分递归重试
+                let mid = lines.len() / 2;
+                let a = Box::pin(extract_session_facts(llm, &lines[..mid])).await;
+                let b = Box::pin(extract_session_facts(llm, &lines[mid..])).await;
+                let mut facts = a.facts;
+                facts.extend(b.facts);
+                SessionExtraction {
+                    facts,
+                    all_ok: a.all_ok && b.all_ok,
+                }
+            } else {
+                eprintln!(
+                    "[weave_session] LLM session 分解失败（{} 条事件），跳过该批次: {e}",
+                    lines.len()
+                );
+                SessionExtraction {
+                    facts: Vec::new(),
+                    all_ok: false,
+                }
+            }
         }
     }
+}
+
+/// 从 LLM JSON 中取出 (事实, 来源 event_id 列表)。
+fn parse_facts_value(v: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    v.get("facts")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| {
+                    let fact = f
+                        .get("fact")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())?;
+                    let srcs: Vec<String> = f
+                        .get("source")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((fact, srcs))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 短回显判定（issue #3）：节点文本短（≤64 字符）且其一半以上内容
+/// 与查询共享同一段连续子串 —— 典型形态是用户短指令（"装一份 ZeroClaw"）
+/// 在向量通道压过真正的解释性答案。仅用于 NYLON_ECHO_DEMOTE 降权。
+fn is_query_echo(query_lower: &str, text_lower: &str) -> bool {
+    let t_len = text_lower.chars().count();
+    if t_len == 0 || t_len > 64 {
+        return false;
+    }
+    longest_common_substring_len(query_lower, text_lower) * 2 >= t_len
+}
+
+/// 最长公共子串长度（字符级 DP；两边都是短文本，开销可忽略）。
+fn longest_common_substring_len(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    let mut best = 0;
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            cur[j] = if a[i - 1] == b[j - 1] {
+                prev[j - 1] + 1
+            } else {
+                0
+            };
+            best = best.max(cur[j]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    best
 }
 
 /// 从 session 抽取一般世界/常识事实，作为桥接节点使用。失败返回空。
@@ -1002,7 +1070,11 @@ async fn process_feedback(
         for id in ctx_ids {
             if let Some(n) = g.store.graph().get_node(id) {
                 if n.tenant_id == rec.tenant_id
-                    && !n.filaments.relations.iter().any(|r| r == WORLD_KNOWLEDGE_TAG)
+                    && !n
+                        .filaments
+                        .relations
+                        .iter()
+                        .any(|r| r == WORLD_KNOWLEDGE_TAG)
                 {
                     ids.push(id);
                     facts.push(n.filaments.fact.clone());
@@ -1597,13 +1669,40 @@ impl MemoryEngine for EngineService {
         }
         let events: Vec<&SessionEvent> = r.events.iter().filter(|e| !e.text.is_empty()).collect();
         // 叶子层：逐事件原文（启发式路径，与验证过的双层实验口径一致）
+        // NYLON_SESSION_DEDUP=1：同 (tenant, owner) 下原文相同的事件复用既有节点，
+        // 客户端重试/回灌相同 event 不再产生重复叶子（issue #3 可选幂等）。
+        let dedup_on = std::env::var("NYLON_SESSION_DEDUP").is_ok();
+        let mut text2node: std::collections::HashMap<String, u32> = if dedup_on {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| Status::internal("state lock poisoned"))?;
+            inner
+                .store
+                .graph()
+                .live_nodes()
+                .filter(|(_, n)| n.tenant_id == r.tenant_id && n.owner_id == r.owner_id)
+                .map(|(id, n)| (n.filaments.fact.clone(), id))
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
         let mut leaf_nodes: Vec<EventNode> = Vec::new();
         let mut id2local: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for ev in &events {
             let raw = format!("{}: {}", ev.speaker, ev.text);
-            let (local, _, _) = self
-                .weave_one(&r.tenant_id, &r.owner_id, &raw, None, WeaveLlmMode::Off)
-                .await?;
+            let local = match text2node.get(&raw) {
+                Some(&id) => id,
+                None => {
+                    let (local, _, _) = self
+                        .weave_one(&r.tenant_id, &r.owner_id, &raw, None, WeaveLlmMode::Off)
+                        .await?;
+                    if dedup_on {
+                        text2node.insert(raw.clone(), local);
+                    }
+                    local
+                }
+            };
             if !ev.event_id.is_empty() {
                 id2local.insert(ev.event_id.clone(), local);
             }
@@ -1615,6 +1714,7 @@ impl MemoryEngine for EngineService {
         // 抽象层：整段 session 一次 LLM 调用，分解为原子事实+来源标注
         let mut fact_nodes: Vec<FactNode> = Vec::new();
         let mut derived: Vec<(u32, u32)> = Vec::new();
+        let mut abstract_status = "skipped";
         if !r.skip_abstract && !events.is_empty() {
             if let Some(llm) = &self.llm {
                 let lines: Vec<String> = events
@@ -1627,8 +1727,15 @@ impl MemoryEngine for EngineService {
                         }
                     })
                     .collect();
-                for (fact, sources) in extract_session_facts(llm.as_ref(), &lines.join("\n")).await
-                {
+                let extraction = extract_session_facts(llm.as_ref(), &lines).await;
+                abstract_status = if !extraction.facts.is_empty() {
+                    "ok"
+                } else if extraction.all_ok {
+                    "empty"
+                } else {
+                    "failed"
+                };
+                for (fact, sources) in extraction.facts {
                     let (local, _, _) = self
                         .weave_one(&r.tenant_id, &r.owner_id, &fact, None, WeaveLlmMode::Off)
                         .await?;
@@ -1700,6 +1807,8 @@ impl MemoryEngine for EngineService {
                         }
                     }
                 }
+            } else {
+                abstract_status = "disabled";
             }
         }
         // 层间显式边：统一一批写入，一次 durability 等待
@@ -1740,6 +1849,7 @@ impl MemoryEngine for EngineService {
         Ok(Response::new(WeaveSessionResponse {
             leaf_nodes,
             fact_nodes,
+            abstract_status: abstract_status.to_string(),
         }))
     }
 
@@ -1921,6 +2031,13 @@ impl MemoryEngine for EngineService {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0);
+        // NYLON_ECHO_DEMOTE（0,1）：与查询高度重叠的短文本（如"装一份 ZeroClaw"
+        // 这类用户指令回显）向量分往往压过真正的解释性内容，按比例降权（issue #3）。
+        let echo_demote = std::env::var("NYLON_ECHO_DEMOTE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|f| *f > 0.0 && *f < 1.0)
+            .unwrap_or(0.0);
         // 种子保底提升统一在向量重排之后做（服务侧），否则重排会打乱图内的提升结果
         let mut activated = g.resonate_opts(&seeds, &ctx, now_secs(), budget, tension_floor, 0);
         // 种子补齐：扩散阶段可能因 budget 截断/张力门槛把部分种子挡在激活集外
@@ -1961,6 +2078,18 @@ impl MemoryEngine for EngineService {
                 activated.sort_by(|a, b| b.1.total_cmp(&a.1));
             }
         }
+        if echo_demote > 0.0 && !query.is_empty() {
+            for (id, s) in activated.iter_mut() {
+                let is_echo = g
+                    .get_node(*id)
+                    .map(|n| is_query_echo(&query, &n.filaments.fact.to_lowercase()))
+                    .unwrap_or(false);
+                if is_echo {
+                    *s *= echo_demote;
+                }
+            }
+            activated.sort_by(|a, b| b.1.total_cmp(&a.1));
+        }
         // 种子保底：直接命中的种子提升置顶（取重排后种子的相对顺序），
         // 防止词面/向量双通道的精确命中被高张力扩散邻居挤出 Top-K
         if seed_quota > 0 {
@@ -1977,7 +2106,7 @@ impl MemoryEngine for EngineService {
             hoisted.extend(rest);
             activated = hoisted;
         }
-        let out: Vec<_> = activated
+        let mut out: Vec<_> = activated
             .into_iter()
             .filter_map(|(id, score)| {
                 let n = g.get_node(id)?;
@@ -1995,6 +2124,11 @@ impl MemoryEngine for EngineService {
                 Some(to_activated(id, score, n))
             })
             .collect();
+        // top_k（issue #3）：显式返回条数上限；0 = 不限制（历史行为）。
+        // budget 只控制图扩散的激活规模，不负责截断返回。
+        if r.top_k > 0 {
+            out.truncate(r.top_k as usize);
+        }
         // 失败驱动反思的数据采集（v2）：零命中/弱命中查询追加到 JSONL，
         // 只用引擎内部信号（命中数/最高张力），不依赖任何金标签。
         // 离线反思 worker 读这个日志对失败簇定向补推断节点。
@@ -2023,7 +2157,10 @@ impl MemoryEngine for EngineService {
                     seeds.len(),
                     top
                 );
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
                 {
                     use std::io::Write;
                     let _ = f.write_all(line.as_bytes());
@@ -2172,7 +2309,9 @@ impl MemoryEngine for EngineService {
             &r.owner_id,
         )?;
         if r.tenant_id.is_empty() || r.owner_id.is_empty() || r.query.is_empty() {
-            return Err(Status::invalid_argument("tenant_id / owner_id / query 不能为空"));
+            return Err(Status::invalid_argument(
+                "tenant_id / owner_id / query 不能为空",
+            ));
         }
         let rec = FeedbackRecord {
             tenant_id: r.tenant_id.clone(),
@@ -2349,6 +2488,7 @@ mod tests {
                 query: "咖啡".into(),
                 context: None,
                 budget: 10,
+                top_k: 0,
             }))
             .await
             .unwrap()
@@ -2368,6 +2508,7 @@ mod tests {
                 query: String::new(),
                 context: None,
                 budget: 10,
+                top_k: 0,
             }))
             .await
             .unwrap()
@@ -2375,6 +2516,112 @@ mod tests {
         let ids: Vec<u64> = resp.activated.iter().map(|n| n.node_id).collect();
         assert!(ids.contains(&b_id));
         assert!(!ids.contains(&a_id), "兜底种子也不得跨租户: {ids:?}");
+    }
+
+    /// issue #3：top_k 是返回条数硬上限；budget 只控制扩散规模。
+    #[tokio::test]
+    async fn resonate_top_k_caps_returned_count() {
+        let (svc, _emb) = svc_with_embed(64);
+        for i in 0..6 {
+            weave_as(&svc, "t1", "alice", &format!("咖啡 偏好记录 {i} 号")).await;
+        }
+        let resp = svc
+            .resonate(Request::new(ResonateRequest {
+                tenant_id: "t1".into(),
+                owner_id: "alice".into(),
+                query: "咖啡".into(),
+                context: None,
+                budget: 64,
+                top_k: 3,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            resp.activated.len() <= 3,
+            "top_k=3 时返回不得超过 3 条，实际 {}",
+            resp.activated.len()
+        );
+        // top_k=0 保持历史行为（不截断）
+        let resp = svc
+            .resonate(Request::new(ResonateRequest {
+                tenant_id: "t1".into(),
+                owner_id: "alice".into(),
+                query: "咖啡".into(),
+                context: None,
+                budget: 64,
+                top_k: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.activated.len() >= 6, "不截断时应返回全部命中");
+    }
+
+    /// issue #3：短回显判定——用户短指令应命中，长解释性文本不命中。
+    #[test]
+    fn echo_detection_matches_short_echoes_only() {
+        assert!(is_query_echo("zeroclaw 是什么", "详细介绍一下 zeroclaw"));
+        assert!(is_query_echo("zeroclaw 是什么", "装一份 zeroclaw"));
+        assert!(!is_query_echo(
+            "zeroclaw 是什么",
+            "zeroclaw 是一个开源的分布式任务调度框架，支持毫秒级触发与租户隔离，最初由 infra 团队在 2024 年开源。"
+        ));
+        // 真正的短事实不应被误判：公共子串不足文本一半
+        assert!(!is_query_echo("window seat", "alice prefers window seats"));
+        assert!(!is_query_echo("", "任意文本"));
+    }
+
+    /// issue #1：长批次 LLM 失败时对半拆分重试，子批成功即可回收事实。
+    #[tokio::test]
+    async fn extract_session_facts_splits_oversized_batches() {
+        use nylon_llm::{ChatModel, LlmError};
+        // 模拟 max_tokens 截断：输入越长越容易失败，短输入正常返回
+        struct FailOnLong;
+        #[async_trait::async_trait]
+        impl ChatModel for FailOnLong {
+            async fn chat_json(
+                &self,
+                _system: &str,
+                user: &str,
+            ) -> Result<serde_json::Value, LlmError> {
+                if user.len() > 200 {
+                    Err(LlmError("响应不是 JSON: 截断".into()))
+                } else {
+                    Ok(serde_json::json!({"facts": [{"fact": "子批事实", "source": []}]}))
+                }
+            }
+        }
+        let lines: Vec<String> = (0..10)
+            .map(|i| format!("t:{i} user: 内容内容内容内容{i}"))
+            .collect();
+        // 整批 ~350B 触发失败；对半后 ~175B 成功（每行含 8 个汉字=24B）
+        assert!(lines.join("\n").len() > 200);
+        assert!(lines[..5].join("\n").len() <= 200);
+        let r = extract_session_facts(&FailOnLong, &lines).await;
+        assert!(!r.facts.is_empty(), "拆分后应回收到事实");
+        assert!(r.all_ok);
+    }
+
+    /// issue #1：全部子批都失败时 all_ok=false（abstract_status=failed）。
+    #[tokio::test]
+    async fn extract_session_facts_reports_failure_when_all_chunks_fail() {
+        use nylon_llm::{ChatModel, LlmError};
+        struct AlwaysFail;
+        #[async_trait::async_trait]
+        impl ChatModel for AlwaysFail {
+            async fn chat_json(
+                &self,
+                _system: &str,
+                _user: &str,
+            ) -> Result<serde_json::Value, LlmError> {
+                Err(LlmError("网络错误".into()))
+            }
+        }
+        let lines: Vec<String> = (0..8).map(|i| format!("user: 内容{i}")).collect();
+        let r = extract_session_facts(&AlwaysFail, &lines).await;
+        assert!(r.facts.is_empty());
+        assert!(!r.all_ok);
     }
 
     /// L2.1：向量检索 Search 不得跨租户（历史漏洞：HNSW 全局索引未过滤）。

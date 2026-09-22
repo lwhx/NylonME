@@ -388,11 +388,13 @@ async fn locomo_evidence_recall() {
 
         if sample_cached {
             dia2nodes = cache_map.get(&sample).cloned().unwrap_or_default();
-            println!("[eval] {sample} 复用缓存编织：{} 个 dia 映射", dia2nodes.len());
+            println!(
+                "[eval] {sample} 复用缓存编织：{} 个 dia 映射",
+                dia2nodes.len()
+            );
         } else if let Some(f) = &cache_file {
             cache_map.insert(sample.clone(), dia2nodes.clone());
-            std::fs::write(f, serde_json::to_string(&cache_map).unwrap())
-                .expect("写编织缓存失败");
+            std::fs::write(f, serde_json::to_string(&cache_map).unwrap()).expect("写编织缓存失败");
         }
 
         if !sample_cached && session_weave && std::env::var("NYLON_WORLD_BRIDGES_ASYNC").is_ok() {
@@ -467,6 +469,7 @@ async fn locomo_evidence_recall() {
                             .ok()
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(32),
+                        top_k: 0,
                     })
                     .await
                 }
@@ -515,6 +518,7 @@ async fn locomo_evidence_recall() {
                                     .ok()
                                     .and_then(|v| v.parse().ok())
                                     .unwrap_or(32),
+                                top_k: 0,
                             })
                             .await
                         }
@@ -587,6 +591,7 @@ async fn locomo_evidence_recall() {
                                     .ok()
                                     .and_then(|v| v.parse().ok())
                                     .unwrap_or(32),
+                                top_k: 0,
                             })
                             .await
                         }
@@ -821,8 +826,7 @@ async fn locomo_evidence_recall() {
                         .map(|f| f.relations.iter().any(|r| r == "inferred"))
                         .unwrap_or(false);
                     if is_infer {
-                        let fact =
-                            a.filaments.as_ref().map(|f| f.fact.as_str()).unwrap_or("");
+                        let fact = a.filaments.as_ref().map(|f| f.fact.as_str()).unwrap_or("");
                         let snip: String = fact.chars().take(120).collect();
                         println!(
                             "[INFER] sample={sample} cat={cat} rank={} n{} r={:.3} :: {snip}",
@@ -1024,10 +1028,7 @@ async fn expand_query(
 /// 动机（2026-09-18）：Cat1 全证据命中仅 27.3%——单查询往往只找回第一跳；
 /// PRF 伪相关反馈实测 -7.8pp（反馈放大第一跳簇，挤掉第二跳），
 /// 分解让不同子查询各找一跳，RRF 防止单一查询的簇主导。
-async fn decompose_query(
-    llm: Option<&dyn nylon_llm::ChatModel>,
-    question: &str,
-) -> Vec<String> {
+async fn decompose_query(llm: Option<&dyn nylon_llm::ChatModel>, question: &str) -> Vec<String> {
     let Some(llm) = llm else {
         return Vec::new();
     };
@@ -1061,12 +1062,55 @@ async fn decompose_query(
 /// 恰好补上聚合所需的上下文广度。
 fn extract_entities(question: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "What", "Where", "When", "Which", "Who", "Whose", "Why", "How", "Does", "Do", "Did",
-        "Is", "Are", "Was", "Were", "Has", "Have", "Had", "The", "This", "That", "These",
-        "Those", "Would", "Could", "Should", "Will", "Can", "May", "Might", "January",
-        "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December", "Monday", "Tuesday", "Wednesday", "Thursday",
-        "Friday", "Saturday", "Sunday",
+        "What",
+        "Where",
+        "When",
+        "Which",
+        "Who",
+        "Whose",
+        "Why",
+        "How",
+        "Does",
+        "Do",
+        "Did",
+        "Is",
+        "Are",
+        "Was",
+        "Were",
+        "Has",
+        "Have",
+        "Had",
+        "The",
+        "This",
+        "That",
+        "These",
+        "Those",
+        "Would",
+        "Could",
+        "Should",
+        "Will",
+        "Can",
+        "May",
+        "Might",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
     ];
     let mut out: Vec<String> = Vec::new();
     for tok in question.split(|c: char| !c.is_alphanumeric()) {

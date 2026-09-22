@@ -66,6 +66,52 @@ async fn rest_feedback_recorded() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
+/// weave_session：无 LLM 时抽象层状态应为 disabled（issue #1 的可观测性字段）。
+#[tokio::test]
+async fn rest_weave_session_abstract_status_disabled_without_llm() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = http::router(test_svc(dir.path()));
+    let (s, b) = call(
+        &app,
+        Request::post("/v1/weave_session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "owner_id": "alice",
+                    "events": [
+                        {"event_id": "e1", "speaker": "user", "text": "Alice 喜欢靠窗座位"},
+                        {"event_id": "e2", "speaker": "assistant", "text": "已记住"},
+                    ]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["leaf_nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(b["abstract_status"], "disabled");
+
+    // skip_abstract=true 时为 skipped
+    let (s, b) = call(
+        &app,
+        Request::post("/v1/weave_session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "owner_id": "alice",
+                    "skip_abstract": true,
+                    "events": [{"event_id": "e3", "speaker": "user", "text": "再说一次"}]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["abstract_status"], "skipped");
+}
+
 #[tokio::test]
 async fn rest_weave_list_get_resonate_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -96,6 +142,27 @@ async fn rest_weave_list_get_resonate_roundtrip() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(b["total"].as_u64().unwrap(), 1);
     assert_eq!(b["nodes"][0]["fact"], "Alice prefers window seats");
+    assert_eq!(b["has_more"].as_bool().unwrap(), false);
+
+    // owner_id 别名（issue #2）：与 owner 等效
+    let (s, b) = call(
+        &app,
+        Request::get("/v1/nodes?owner_id=alice")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["total"].as_u64().unwrap(), 1);
+    let (s, b) = call(
+        &app,
+        Request::get("/v1/nodes?owner_id=nope")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["total"].as_u64().unwrap(), 0);
 
     // owner filter excludes other tenants' owners
     let (s, b) = call(
@@ -140,6 +207,21 @@ async fn rest_weave_list_get_resonate_roundtrip() {
     .await;
     assert_eq!(s, StatusCode::OK, "{b}");
     assert_eq!(b["activated"].as_array().unwrap().len(), 1);
+
+    // top_k=0（不传）不限制；top_k=1 截断到 1 条（issue #3）
+    let (s, b) = call(
+        &app,
+        Request::post("/v1/resonate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"owner_id": "alice", "query": "window seat", "budget": 64, "top_k": 1})
+                    .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert!(b["activated"].as_array().unwrap().len() <= 1);
 
     // stats
     let (s, b) = call(&app, Request::get("/v1/stats").body(Body::empty()).unwrap()).await;
@@ -265,7 +347,11 @@ async fn mcp_http_open_mode_roundtrip() {
     let (s, b) = mcp_call(
         &app,
         None,
-        mcp_tool_call(3, "memory_resonate", json!({"query": "window seat", "owner": "alice"})),
+        mcp_tool_call(
+            3,
+            "memory_resonate",
+            json!({"query": "window seat", "owner": "alice"}),
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{b}");
@@ -309,7 +395,11 @@ async fn mcp_http_auth_enforced() {
     let (s, b) = mcp_call(
         &app,
         Some("k-good"),
-        mcp_tool_call(2, "memory_weave", json!({"fact": "team fact", "owner": "team"})),
+        mcp_tool_call(
+            2,
+            "memory_weave",
+            json!({"fact": "team fact", "owner": "team"}),
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{b}");

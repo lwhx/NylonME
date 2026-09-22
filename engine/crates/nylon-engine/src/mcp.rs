@@ -196,6 +196,8 @@ impl NylonMcp {
                 max_hops: args.max_hops,
             }),
             budget: args.budget.unwrap_or(8),
+            // budget 的既有语义即"返回条数上限"（见工具描述），同步到 top_k（issue #3）
+            top_k: args.budget.unwrap_or(8),
         };
         let resp =
             pb::memory_engine_server::MemoryEngine::resonate(&*self.svc, tonic::Request::new(req))

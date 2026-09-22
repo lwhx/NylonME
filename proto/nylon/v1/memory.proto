@@ -58,7 +58,8 @@ message ResonateRequest {
   string owner_id = 2;
   string query = 3;                   // 用于生成种子节点
   ContextSpectrum context = 4;
-  uint32 budget = 5;                  // 全局激活预算（Top-K 截断，默认 64）
+  uint32 budget = 5;                  // 全局激活预算（图扩散规模上限，默认 64），不作为返回条数上限
+  uint32 top_k = 6;                   // 返回条数上限：0 = 不限制（按激活结果全量返回）
 }
 
 message ActivatedNode {
@@ -136,4 +137,7 @@ message FactNode {
 message WeaveSessionResponse {
   repeated EventNode leaf_nodes = 1;  // 叶子层：事件 -> 节点
   repeated FactNode fact_nodes = 2;   // 抽象层：事实 -> 来源事件
+  // 抽象层状态：ok=抽取成功 | empty=LLM 正常但无事实 | failed=LLM 调用/解析失败（已对半重试）
+  // skipped=skip_abstract 或无事件 | disabled=未配置 LLM
+  string abstract_status = 3;
 }

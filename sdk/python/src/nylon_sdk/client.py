@@ -121,6 +121,7 @@ def _session_result(resp: pb.WeaveSessionResponse) -> SessionResult:
             )
             for f in resp.fact_nodes
         ),
+        abstract_status=resp.abstract_status,
     )
 
 
@@ -206,6 +207,7 @@ class NylonClient:
         query: str,
         *,
         budget: int = 0,
+        top_k: int = 0,
         task: Optional[str] = None,
         emotion_valence: Optional[float] = None,
         device: Optional[str] = None,
@@ -218,6 +220,7 @@ class NylonClient:
                 query=query,
                 context=_context(task, emotion_valence, device, max_hops),
                 budget=budget,
+                top_k=top_k,
             ),
             timeout=self.timeout,
         )
@@ -348,6 +351,7 @@ class AsyncNylonClient:
         query: str,
         *,
         budget: int = 0,
+        top_k: int = 0,
         task: Optional[str] = None,
         emotion_valence: Optional[float] = None,
         device: Optional[str] = None,
@@ -360,6 +364,7 @@ class AsyncNylonClient:
                 query=query,
                 context=_context(task, emotion_valence, device, max_hops),
                 budget=budget,
+                top_k=top_k,
             ),
             timeout=self.timeout,
         )

@@ -71,6 +71,8 @@ class FactNode:
 class SessionResult:
     leaf_nodes: tuple[EventNode, ...] = ()
     fact_nodes: tuple[FactNode, ...] = ()
+    # 抽象层状态：ok | empty | failed | skipped | disabled（区分"无事实"与"LLM 失败"）
+    abstract_status: str = ""
 
 
 @dataclass(frozen=True)

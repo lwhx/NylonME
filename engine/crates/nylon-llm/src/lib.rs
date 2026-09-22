@@ -4,6 +4,7 @@
 //! - [`StubChatModel`]：离线固定应答，供集成测试验证接线。
 //!
 //! 引擎通过 NYLON_LLM_URL / NYLON_LLM_MODEL / NYLON_LLM_API_KEY 配置；
+//! 可选 NYLON_LLM_MAX_TOKENS 覆盖输出预算（默认 4096）；
 //! 未配置时 LLM 通道关闭（Weave 回退启发式分解、冲突检测为空）。
 use std::time::Duration;
 
@@ -14,8 +15,8 @@ pub trait ChatModel: Send + Sync {
     async fn chat_json(&self, system: &str, user: &str) -> Result<serde_json::Value, LlmError>;
 
     /// 带输出预算的 JSON 请求。默认忽略预算回退 chat_json；
-    /// HTTP 后端克隆自身覆盖 max_tokens（画像合并等多实体长输出场景，
-    /// 默认 1536 会截断 JSON——实测 2 会话评测 58 次画像抽取失败 18 次）。
+    /// HTTP 后端克隆自身覆盖 max_tokens（画像合并等多实体长输出场景会截断 JSON——
+    /// 实测 2 会话评测 58 次画像抽取失败 18 次）。
     async fn chat_json_budget(
         &self,
         system: &str,
@@ -103,7 +104,10 @@ impl HttpChatModel {
             model: model.into(),
             api_key,
             thinking_off: std::env::var("NYLON_LLM_THINKING_OFF").is_ok(),
-            max_tokens: 1536,
+            // 默认 4096：1536 在会话级分解（40+ 事件）下频繁截断 JSON，
+            // 导致抽象层静默丢空（GitHub issue #1）。短输出场景不受影响——
+            // 模型生成完 JSON 即停，预算只是上限。
+            max_tokens: 4096,
             temperature: Some(0.0),
         }
     }
@@ -141,6 +145,8 @@ impl HttpChatModel {
 }
 
 /// 从响应文本中取出 JSON 对象（容忍 markdown 代码块包裹等常见输出）。
+/// 整段解析失败时尝试抢救被 max_tokens 截断的 `{"key": [...]}` 数组：
+/// 括号配对扫描提取每一个完整元素，部分恢复远好于整批丢弃。
 fn parse_json_loose(text: &str) -> Result<serde_json::Value, LlmError> {
     let t = text.trim();
     if let Ok(v) = serde_json::from_str(t) {
@@ -154,10 +160,104 @@ fn parse_json_loose(text: &str) -> Result<serde_json::Value, LlmError> {
             }
         }
     }
+    if let Some(v) = salvage_truncated_array(t) {
+        return Ok(v);
+    }
     Err(LlmError(format!(
-        "响应不是 JSON: {}",
-        &t[t.len().saturating_sub(200)..]
+        "响应不是 JSON: 头[{}] 尾[{}]",
+        &t[..t.len().min(300)],
+        &t[t.len().saturating_sub(300)..]
     )))
+}
+
+/// 抢救被截断的 `{"key": [完整元素, ...` 数组：按括号/引号配对提取完整元素，
+/// 重建为 `{"key": [...]}`。元素支持对象与字符串；一个不完整即停止（后续皆不可信）。
+fn salvage_truncated_array(t: &str) -> Option<serde_json::Value> {
+    let start = t.find('{')?;
+    let bracket = t[start..].find('[')? + start;
+    let head = &t[start..bracket];
+    // 提取数组键名："key": [ 之间的第一个引号串
+    let q1 = head.find('"')?;
+    let q2 = head[q1 + 1..].find('"')? + q1 + 1;
+    let key = &head[q1 + 1..q2];
+    if key.is_empty() {
+        return None;
+    }
+    let bytes = t.as_bytes();
+    let mut elems = Vec::new();
+    let mut i = bracket + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                match scan_json_object(t, i) {
+                    Some((end, v)) => {
+                        elems.push(v);
+                        i = end;
+                    }
+                    // 截断点：保留已收集的完整元素，停止扫描
+                    None => break,
+                }
+            }
+            b'"' => match scan_json_string(t, i) {
+                Some((end, s)) => {
+                    elems.push(serde_json::Value::String(s));
+                    i = end;
+                }
+                None => break,
+            },
+            _ => i += 1,
+        }
+    }
+    if elems.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ key: elems }))
+}
+
+/// 从 i 处（须为 '{'）做括号配对扫描（跳过字符串内的括号与转义），
+/// 返回完整对象解析结果与结束位置；配对不上或解析失败返回 None。
+fn scan_json_object(t: &str, i: usize) -> Option<(usize, serde_json::Value)> {
+    let bytes = t.as_bytes();
+    let mut depth = 0usize;
+    let mut j = i;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'"' => {
+                let (end, _) = scan_json_string(t, j)?;
+                j = end;
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let v = serde_json::from_str(&t[i..=j]).ok()?;
+                    return Some((j + 1, v));
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// 从 i 处（须为 '"'）扫描一个 JSON 字符串字面量，返回结束位置与解码值。
+fn scan_json_string(t: &str, i: usize) -> Option<(usize, String)> {
+    let bytes = t.as_bytes();
+    let mut j = i + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 1, // 跳过转义字符
+            b'"' => {
+                let v: String = serde_json::from_str(&t[i..=j]).ok()?;
+                return Some((j + 1, v));
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
 }
 
 #[async_trait::async_trait]
@@ -257,7 +357,19 @@ pub fn llm_from_env() -> Option<std::sync::Arc<dyn ChatModel>> {
     let url = std::env::var("NYLON_LLM_URL").ok()?;
     let model = std::env::var("NYLON_LLM_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
     let key = std::env::var("NYLON_LLM_API_KEY").ok();
-    Some(std::sync::Arc::new(HttpChatModel::new(url, model, key)))
+    let m = HttpChatModel::new(url, model, key);
+    // NYLON_LLM_MAX_TOKENS：显式覆盖输出预算（会话长输入截断 JSON 时调大）
+    let m = match std::env::var("NYLON_LLM_MAX_TOKENS") {
+        Ok(v) => match v.parse::<u32>() {
+            Ok(n) if n > 0 => m.with_max_tokens(n),
+            _ => {
+                eprintln!("[llm] NYLON_LLM_MAX_TOKENS={v} 不是正整数，忽略");
+                m
+            }
+        },
+        Err(_) => m,
+    };
+    Some(std::sync::Arc::new(m))
 }
 
 #[cfg(test)]
@@ -284,5 +396,49 @@ mod tests {
         let v = parse_json_loose(r#"{"b": 2}"#).unwrap();
         assert_eq!(v["b"], 2);
         assert!(parse_json_loose("b9;䷧ JSON").is_err());
+    }
+
+    #[test]
+    fn parse_json_loose_salvages_truncated_object_array() {
+        // max_tokens 截断：第三个对象写了一半 —— 抢救前两个完整对象
+        let truncated = r#"{"facts": [{"fact": "a", "source": ["t:1"]}, {"fact": "b", "source": ["t:2"]}, {"fact": "c", "sou"#;
+        let v = parse_json_loose(truncated).unwrap();
+        let facts = v["facts"].as_array().unwrap();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0]["fact"], "a");
+        assert_eq!(facts[1]["source"][0], "t:2");
+    }
+
+    #[test]
+    fn parse_json_loose_salvages_truncated_string_array() {
+        let truncated = r#"{"inferences": ["甲对咖啡因敏感", "乙上周搬去了杭州", "丙"#;
+        let v = parse_json_loose(truncated).unwrap();
+        let arr = v["inferences"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[1], "乙上周搬去了杭州");
+    }
+
+    #[test]
+    fn parse_json_loose_salvage_handles_braces_inside_strings() {
+        // 字符串里的花括号不得干扰配对
+        let truncated = r#"{"facts": [{"fact": "配置格式是 {json}", "source": []}, {"fact": "x"#;
+        let v = parse_json_loose(truncated).unwrap();
+        let facts = v["facts"].as_array().unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0]["fact"], "配置格式是 {json}");
+    }
+
+    #[test]
+    fn parse_json_loose_error_reports_head_and_tail() {
+        let long_garbage = "散".repeat(1000);
+        let err = parse_json_loose(&long_garbage).unwrap_err().to_string();
+        assert!(err.contains("头["), "错误应含头部摘要: {err}");
+        assert!(err.contains("尾["), "错误应含尾部摘要: {err}");
+    }
+
+    #[test]
+    fn parse_json_loose_salvage_ignores_pure_prose() {
+        // 纯散文（无 "key": [ 结构）不可抢救
+        assert!(parse_json_loose("我认为这些对话没有值得记住的事实。").is_err());
     }
 }

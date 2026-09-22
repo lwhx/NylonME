@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15nylon/v1/memory.proto\x12\x08nylon.v1\"\xb1\x01\n\tFilaments\x12\x0c\n\x04\x66\x61\x63t\x18\x01 \x01(\t\x12\x17\n\x0f\x65motion_valence\x18\x02 \x01(\x02\x12\x19\n\x11\x65motion_intensity\x18\x03 \x01(\x02\x12\x12\n\ncreated_at\x18\x04 \x01(\x03\x12\x12\n\ndecay_rate\x18\x05 \x01(\x02\x12\x11\n\trelations\x18\x06 \x03(\t\x12\x12\n\nconfidence\x18\x07 \x01(\x02\x12\x13\n\x0bmentions_7d\x18\x08 \x01(\r\"\xa3\x01\n\x0f\x43ontextSpectrum\x12\x11\n\x04task\x18\x01 \x01(\tH\x00\x88\x01\x01\x12\x1c\n\x0f\x65motion_valence\x18\x02 \x01(\x02H\x01\x88\x01\x01\x12\x13\n\x06\x64\x65vice\x18\x03 \x01(\tH\x02\x88\x01\x01\x12\x15\n\x08max_hops\x18\x04 \x01(\rH\x03\x88\x01\x01\x42\x07\n\x05_taskB\x12\n\x10_emotion_valenceB\t\n\x07_deviceB\x0b\n\t_max_hops\"r\n\x0cWeaveRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\x11\n\traw_event\x18\x03 \x01(\t\x12*\n\x07\x63ontext\x18\x04 \x01(\x0b\x32\x19.nylon.v1.ContextSpectrum\"N\n\rWeaveResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12\x14\n\x0clinked_nodes\x18\x02 \x03(\x04\x12\x16\n\x0e\x63onflict_nodes\x18\x03 \x03(\x04\"\x81\x01\n\x0fResonateRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\r\n\x05query\x18\x03 \x01(\t\x12*\n\x07\x63ontext\x18\x04 \x01(\x0b\x32\x19.nylon.v1.ContextSpectrum\x12\x0e\n\x06\x62udget\x18\x05 \x01(\r\"[\n\rActivatedNode\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12\x11\n\tresonance\x18\x02 \x01(\x02\x12&\n\tfilaments\x18\x03 \x01(\x0b\x32\x13.nylon.v1.Filaments\"P\n\x10ResonateResponse\x12*\n\tactivated\x18\x01 \x03(\x0b\x32\x17.nylon.v1.ActivatedNode\x12\x10\n\x08seed_ids\x18\x02 \x03(\x04\"\\\n\rSearchRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\x17\n\x0fquery_embedding\x18\x03 \x01(\x0c\x12\r\n\x05top_k\x18\x04 \x01(\r\"<\n\x0eSearchResponse\x12*\n\tneighbors\x18\x01 \x03(\x0b\x32\x17.nylon.v1.ActivatedNode\"4\n\x0eGetNodeRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\x04\"c\n\x0fGetNodeResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12&\n\tfilaments\x18\x02 \x01(\x0b\x32\x13.nylon.v1.Filaments\x12\x17\n\x0f\x63urrent_tension\x18\x03 \x01(\x02\"~\n\x0f\x46\x65\x65\x64\x62\x61\x63kRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\r\n\x05query\x18\x03 \x01(\t\x12\x0e\n\x06rating\x18\x04 \x01(\t\x12\x0f\n\x07\x63omment\x18\x05 \x01(\t\x12\x16\n\x0eshown_node_ids\x18\x06 \x03(\x04\"$\n\x10\x46\x65\x65\x64\x62\x61\x63kResponse\x12\x10\n\x08recorded\x18\x01 \x01(\x08\"?\n\x0cSessionEvent\x12\x10\n\x08\x65vent_id\x18\x01 \x01(\t\x12\x0f\n\x07speaker\x18\x02 \x01(\t\x12\x0c\n\x04text\x18\x03 \x01(\t\"y\n\x13WeaveSessionRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12&\n\x06\x65vents\x18\x03 \x03(\x0b\x32\x16.nylon.v1.SessionEvent\x12\x15\n\rskip_abstract\x18\x04 \x01(\x08\".\n\tEventNode\x12\x10\n\x08\x65vent_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\x04\"C\n\x08\x46\x61\x63tNode\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12\x0c\n\x04\x66\x61\x63t\x18\x02 \x01(\t\x12\x18\n\x10source_event_ids\x18\x03 \x03(\t\"g\n\x14WeaveSessionResponse\x12\'\n\nleaf_nodes\x18\x01 \x03(\x0b\x32\x13.nylon.v1.EventNode\x12&\n\nfact_nodes\x18\x02 \x03(\x0b\x32\x12.nylon.v1.FactNode2\xa0\x03\n\x0cMemoryEngine\x12\x38\n\x05Weave\x12\x16.nylon.v1.WeaveRequest\x1a\x17.nylon.v1.WeaveResponse\x12M\n\x0cWeaveSession\x12\x1d.nylon.v1.WeaveSessionRequest\x1a\x1e.nylon.v1.WeaveSessionResponse\x12\x41\n\x08Resonate\x12\x19.nylon.v1.ResonateRequest\x1a\x1a.nylon.v1.ResonateResponse\x12;\n\x06Search\x12\x17.nylon.v1.SearchRequest\x1a\x18.nylon.v1.SearchResponse\x12>\n\x07GetNode\x12\x18.nylon.v1.GetNodeRequest\x1a\x19.nylon.v1.GetNodeResponse\x12G\n\x0eReportFeedback\x12\x19.nylon.v1.FeedbackRequest\x1a\x1a.nylon.v1.FeedbackResponseB7Z5github.com/nylonmemory/nylon/api/gen/nylon/v1;nylonv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15nylon/v1/memory.proto\x12\x08nylon.v1\"\xb1\x01\n\tFilaments\x12\x0c\n\x04\x66\x61\x63t\x18\x01 \x01(\t\x12\x17\n\x0f\x65motion_valence\x18\x02 \x01(\x02\x12\x19\n\x11\x65motion_intensity\x18\x03 \x01(\x02\x12\x12\n\ncreated_at\x18\x04 \x01(\x03\x12\x12\n\ndecay_rate\x18\x05 \x01(\x02\x12\x11\n\trelations\x18\x06 \x03(\t\x12\x12\n\nconfidence\x18\x07 \x01(\x02\x12\x13\n\x0bmentions_7d\x18\x08 \x01(\r\"\xa3\x01\n\x0f\x43ontextSpectrum\x12\x11\n\x04task\x18\x01 \x01(\tH\x00\x88\x01\x01\x12\x1c\n\x0f\x65motion_valence\x18\x02 \x01(\x02H\x01\x88\x01\x01\x12\x13\n\x06\x64\x65vice\x18\x03 \x01(\tH\x02\x88\x01\x01\x12\x15\n\x08max_hops\x18\x04 \x01(\rH\x03\x88\x01\x01\x42\x07\n\x05_taskB\x12\n\x10_emotion_valenceB\t\n\x07_deviceB\x0b\n\t_max_hops\"r\n\x0cWeaveRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\x11\n\traw_event\x18\x03 \x01(\t\x12*\n\x07\x63ontext\x18\x04 \x01(\x0b\x32\x19.nylon.v1.ContextSpectrum\"N\n\rWeaveResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12\x14\n\x0clinked_nodes\x18\x02 \x03(\x04\x12\x16\n\x0e\x63onflict_nodes\x18\x03 \x03(\x04\"\x90\x01\n\x0fResonateRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\r\n\x05query\x18\x03 \x01(\t\x12*\n\x07\x63ontext\x18\x04 \x01(\x0b\x32\x19.nylon.v1.ContextSpectrum\x12\x0e\n\x06\x62udget\x18\x05 \x01(\r\x12\r\n\x05top_k\x18\x06 \x01(\r\"[\n\rActivatedNode\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12\x11\n\tresonance\x18\x02 \x01(\x02\x12&\n\tfilaments\x18\x03 \x01(\x0b\x32\x13.nylon.v1.Filaments\"P\n\x10ResonateResponse\x12*\n\tactivated\x18\x01 \x03(\x0b\x32\x17.nylon.v1.ActivatedNode\x12\x10\n\x08seed_ids\x18\x02 \x03(\x04\"\\\n\rSearchRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\x17\n\x0fquery_embedding\x18\x03 \x01(\x0c\x12\r\n\x05top_k\x18\x04 \x01(\r\"<\n\x0eSearchResponse\x12*\n\tneighbors\x18\x01 \x03(\x0b\x32\x17.nylon.v1.ActivatedNode\"4\n\x0eGetNodeRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\x04\"c\n\x0fGetNodeResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12&\n\tfilaments\x18\x02 \x01(\x0b\x32\x13.nylon.v1.Filaments\x12\x17\n\x0f\x63urrent_tension\x18\x03 \x01(\x02\"~\n\x0f\x46\x65\x65\x64\x62\x61\x63kRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12\r\n\x05query\x18\x03 \x01(\t\x12\x0e\n\x06rating\x18\x04 \x01(\t\x12\x0f\n\x07\x63omment\x18\x05 \x01(\t\x12\x16\n\x0eshown_node_ids\x18\x06 \x03(\x04\"$\n\x10\x46\x65\x65\x64\x62\x61\x63kResponse\x12\x10\n\x08recorded\x18\x01 \x01(\x08\"?\n\x0cSessionEvent\x12\x10\n\x08\x65vent_id\x18\x01 \x01(\t\x12\x0f\n\x07speaker\x18\x02 \x01(\t\x12\x0c\n\x04text\x18\x03 \x01(\t\"y\n\x13WeaveSessionRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x10\n\x08owner_id\x18\x02 \x01(\t\x12&\n\x06\x65vents\x18\x03 \x03(\x0b\x32\x16.nylon.v1.SessionEvent\x12\x15\n\rskip_abstract\x18\x04 \x01(\x08\".\n\tEventNode\x12\x10\n\x08\x65vent_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\x04\"C\n\x08\x46\x61\x63tNode\x12\x0f\n\x07node_id\x18\x01 \x01(\x04\x12\x0c\n\x04\x66\x61\x63t\x18\x02 \x01(\t\x12\x18\n\x10source_event_ids\x18\x03 \x03(\t\"\x80\x01\n\x14WeaveSessionResponse\x12\'\n\nleaf_nodes\x18\x01 \x03(\x0b\x32\x13.nylon.v1.EventNode\x12&\n\nfact_nodes\x18\x02 \x03(\x0b\x32\x12.nylon.v1.FactNode\x12\x17\n\x0f\x61\x62stract_status\x18\x03 \x01(\t2\xa0\x03\n\x0cMemoryEngine\x12\x38\n\x05Weave\x12\x16.nylon.v1.WeaveRequest\x1a\x17.nylon.v1.WeaveResponse\x12M\n\x0cWeaveSession\x12\x1d.nylon.v1.WeaveSessionRequest\x1a\x1e.nylon.v1.WeaveSessionResponse\x12\x41\n\x08Resonate\x12\x19.nylon.v1.ResonateRequest\x1a\x1a.nylon.v1.ResonateResponse\x12;\n\x06Search\x12\x17.nylon.v1.SearchRequest\x1a\x18.nylon.v1.SearchResponse\x12>\n\x07GetNode\x12\x18.nylon.v1.GetNodeRequest\x1a\x19.nylon.v1.GetNodeResponse\x12G\n\x0eReportFeedback\x12\x19.nylon.v1.FeedbackRequest\x1a\x1a.nylon.v1.FeedbackResponseB7Z5github.com/nylonmemory/nylon/api/gen/nylon/v1;nylonv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -41,33 +41,33 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_WEAVERESPONSE']._serialized_start=497
   _globals['_WEAVERESPONSE']._serialized_end=575
   _globals['_RESONATEREQUEST']._serialized_start=578
-  _globals['_RESONATEREQUEST']._serialized_end=707
-  _globals['_ACTIVATEDNODE']._serialized_start=709
-  _globals['_ACTIVATEDNODE']._serialized_end=800
-  _globals['_RESONATERESPONSE']._serialized_start=802
-  _globals['_RESONATERESPONSE']._serialized_end=882
-  _globals['_SEARCHREQUEST']._serialized_start=884
-  _globals['_SEARCHREQUEST']._serialized_end=976
-  _globals['_SEARCHRESPONSE']._serialized_start=978
-  _globals['_SEARCHRESPONSE']._serialized_end=1038
-  _globals['_GETNODEREQUEST']._serialized_start=1040
-  _globals['_GETNODEREQUEST']._serialized_end=1092
-  _globals['_GETNODERESPONSE']._serialized_start=1094
-  _globals['_GETNODERESPONSE']._serialized_end=1193
-  _globals['_FEEDBACKREQUEST']._serialized_start=1195
-  _globals['_FEEDBACKREQUEST']._serialized_end=1321
-  _globals['_FEEDBACKRESPONSE']._serialized_start=1323
-  _globals['_FEEDBACKRESPONSE']._serialized_end=1359
-  _globals['_SESSIONEVENT']._serialized_start=1361
-  _globals['_SESSIONEVENT']._serialized_end=1424
-  _globals['_WEAVESESSIONREQUEST']._serialized_start=1426
-  _globals['_WEAVESESSIONREQUEST']._serialized_end=1547
-  _globals['_EVENTNODE']._serialized_start=1549
-  _globals['_EVENTNODE']._serialized_end=1595
-  _globals['_FACTNODE']._serialized_start=1597
-  _globals['_FACTNODE']._serialized_end=1664
-  _globals['_WEAVESESSIONRESPONSE']._serialized_start=1666
-  _globals['_WEAVESESSIONRESPONSE']._serialized_end=1769
-  _globals['_MEMORYENGINE']._serialized_start=1772
-  _globals['_MEMORYENGINE']._serialized_end=2188
+  _globals['_RESONATEREQUEST']._serialized_end=722
+  _globals['_ACTIVATEDNODE']._serialized_start=724
+  _globals['_ACTIVATEDNODE']._serialized_end=815
+  _globals['_RESONATERESPONSE']._serialized_start=817
+  _globals['_RESONATERESPONSE']._serialized_end=897
+  _globals['_SEARCHREQUEST']._serialized_start=899
+  _globals['_SEARCHREQUEST']._serialized_end=991
+  _globals['_SEARCHRESPONSE']._serialized_start=993
+  _globals['_SEARCHRESPONSE']._serialized_end=1053
+  _globals['_GETNODEREQUEST']._serialized_start=1055
+  _globals['_GETNODEREQUEST']._serialized_end=1107
+  _globals['_GETNODERESPONSE']._serialized_start=1109
+  _globals['_GETNODERESPONSE']._serialized_end=1208
+  _globals['_FEEDBACKREQUEST']._serialized_start=1210
+  _globals['_FEEDBACKREQUEST']._serialized_end=1336
+  _globals['_FEEDBACKRESPONSE']._serialized_start=1338
+  _globals['_FEEDBACKRESPONSE']._serialized_end=1374
+  _globals['_SESSIONEVENT']._serialized_start=1376
+  _globals['_SESSIONEVENT']._serialized_end=1439
+  _globals['_WEAVESESSIONREQUEST']._serialized_start=1441
+  _globals['_WEAVESESSIONREQUEST']._serialized_end=1562
+  _globals['_EVENTNODE']._serialized_start=1564
+  _globals['_EVENTNODE']._serialized_end=1610
+  _globals['_FACTNODE']._serialized_start=1612
+  _globals['_FACTNODE']._serialized_end=1679
+  _globals['_WEAVESESSIONRESPONSE']._serialized_start=1682
+  _globals['_WEAVESESSIONRESPONSE']._serialized_end=1810
+  _globals['_MEMORYENGINE']._serialized_start=1813
+  _globals['_MEMORYENGINE']._serialized_end=2229
 # @@protoc_insertion_point(module_scope)

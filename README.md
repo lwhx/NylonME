@@ -162,6 +162,9 @@ RocksDB supports periodic snapshot + WAL truncation (`NYLON_CHECKPOINT_SECS`, de
 | `NYLON_RERANK_VEC` | 0 | blend weight of query-node cosine similarity into resonance ranking |
 | `NYLON_TENSION_FLOOR` | 0 | lower bound on tension during ranking (does not mutate node state) |
 | `NYLON_SEED_QUOTA` | 0 | reserved front slots for direct-match seeds in the output |
+| `NYLON_LLM_MAX_TOKENS` | 4096 | LLM output budget; raise if session extraction JSON gets truncated |
+| `NYLON_ECHO_DEMOTE` | off | factor in (0,1) to demote short query-echo nodes (e.g. "install ZeroClaw") below informative answers in resonate ranking |
+| `NYLON_SESSION_DEDUP` | off | weave_session reuses the existing node when the same (tenant, owner, text) was already woven — retry-safe replays |
 | `NYLON_DERIVED_EDGES` | off | explicit abstract-layer → leaf edges (measured net-negative for temporal/commonsense, keep off) |
 | `NYLON_WORLD_BRIDGES` / `NYLON_WORLD_BRIDGES_ASYNC` | off | commonsense world-knowledge bridges (sync / async reflection) |
 | `NYLON_PERSONA_REFLECT` | off | persona profile nodes in async reflection |

@@ -52,7 +52,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Filter by owner_id"
+            "description": "Filter by owner_id (alias: owner_id)"
           },
           {
             "name": "offset",
@@ -69,7 +69,8 @@
               "type": "integer",
               "default": 50,
               "maximum": 500
-            }
+            },
+            "description": "Page size (capped at 500; use offset + has_more to page deterministically)"
           }
         ],
         "responses": {
@@ -82,6 +83,10 @@
                   "properties": {
                     "total": {
                       "type": "integer"
+                    },
+                    "has_more": {
+                      "type": "boolean",
+                      "description": "true when offset + returned < total (more pages available)"
                     },
                     "nodes": {
                       "type": "array",
@@ -629,6 +634,11 @@
                 }
               }
             }
+          },
+          "abstract_status": {
+            "type": "string",
+            "enum": ["ok", "empty", "failed", "skipped", "disabled"],
+            "description": "abstraction-layer outcome: ok=facts extracted | empty=LLM ok but no facts | failed=LLM call/parse failed (batch-split retried) | skipped=skip_abstract or no events | disabled=no LLM configured"
           }
         }
       },
@@ -652,7 +662,12 @@
           "budget": {
             "type": "integer",
             "default": 0,
-            "description": "activation budget (top-k), 0 = engine default"
+            "description": "activation budget: graph spreading scale, 0 = engine default (does NOT cap returned count; use top_k)"
+          },
+          "top_k": {
+            "type": "integer",
+            "default": 0,
+            "description": "max number of returned nodes, 0 = unlimited"
           },
           "max_hops": {
             "type": "integer",

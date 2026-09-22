@@ -61,18 +61,20 @@ class WeaveResponse(_message.Message):
     def __init__(self, node_id: _Optional[int] = ..., linked_nodes: _Optional[_Iterable[int]] = ..., conflict_nodes: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class ResonateRequest(_message.Message):
-    __slots__ = ("tenant_id", "owner_id", "query", "context", "budget")
+    __slots__ = ("tenant_id", "owner_id", "query", "context", "budget", "top_k")
     TENANT_ID_FIELD_NUMBER: _ClassVar[int]
     OWNER_ID_FIELD_NUMBER: _ClassVar[int]
     QUERY_FIELD_NUMBER: _ClassVar[int]
     CONTEXT_FIELD_NUMBER: _ClassVar[int]
     BUDGET_FIELD_NUMBER: _ClassVar[int]
+    TOP_K_FIELD_NUMBER: _ClassVar[int]
     tenant_id: str
     owner_id: str
     query: str
     context: ContextSpectrum
     budget: int
-    def __init__(self, tenant_id: _Optional[str] = ..., owner_id: _Optional[str] = ..., query: _Optional[str] = ..., context: _Optional[_Union[ContextSpectrum, _Mapping]] = ..., budget: _Optional[int] = ...) -> None: ...
+    top_k: int
+    def __init__(self, tenant_id: _Optional[str] = ..., owner_id: _Optional[str] = ..., query: _Optional[str] = ..., context: _Optional[_Union[ContextSpectrum, _Mapping]] = ..., budget: _Optional[int] = ..., top_k: _Optional[int] = ...) -> None: ...
 
 class ActivatedNode(_message.Message):
     __slots__ = ("node_id", "resonance", "filaments")
@@ -191,9 +193,11 @@ class FactNode(_message.Message):
     def __init__(self, node_id: _Optional[int] = ..., fact: _Optional[str] = ..., source_event_ids: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class WeaveSessionResponse(_message.Message):
-    __slots__ = ("leaf_nodes", "fact_nodes")
+    __slots__ = ("leaf_nodes", "fact_nodes", "abstract_status")
     LEAF_NODES_FIELD_NUMBER: _ClassVar[int]
     FACT_NODES_FIELD_NUMBER: _ClassVar[int]
+    ABSTRACT_STATUS_FIELD_NUMBER: _ClassVar[int]
     leaf_nodes: _containers.RepeatedCompositeFieldContainer[EventNode]
     fact_nodes: _containers.RepeatedCompositeFieldContainer[FactNode]
-    def __init__(self, leaf_nodes: _Optional[_Iterable[_Union[EventNode, _Mapping]]] = ..., fact_nodes: _Optional[_Iterable[_Union[FactNode, _Mapping]]] = ...) -> None: ...
+    abstract_status: str
+    def __init__(self, leaf_nodes: _Optional[_Iterable[_Union[EventNode, _Mapping]]] = ..., fact_nodes: _Optional[_Iterable[_Union[FactNode, _Mapping]]] = ..., abstract_status: _Optional[str] = ...) -> None: ...

@@ -66,6 +66,8 @@ struct ResonateBody {
     query: String,
     tenant_id: Option<String>,
     budget: Option<u32>,
+    // 返回条数上限（issue #3）；budget 只控制图扩散规模、不截断返回
+    top_k: Option<u32>,
     max_hops: Option<u32>,
     task: Option<String>,
     emotion_valence: Option<f32>,
@@ -106,7 +108,10 @@ struct FeedbackBody {
 
 #[derive(Deserialize)]
 struct ListQuery {
+    #[serde(alias = "tenant_id")]
     tenant: Option<String>,
+    // 其余端点（weave/resonate）统一叫 owner_id；这里接受两种写法（issue #2）
+    #[serde(alias = "owner_id")]
     owner: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -114,7 +119,9 @@ struct ListQuery {
 
 #[derive(Deserialize)]
 struct AuditQuery {
+    #[serde(alias = "tenant_id")]
     tenant: Option<String>,
+    #[serde(alias = "owner_id")]
     owner: Option<String>,
     action: Option<String>,
     limit: Option<usize>,
@@ -306,10 +313,15 @@ async fn list_nodes(
     let tenant = q.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.into());
     http_authorize(svc.auth(), &headers, Scope::Read, Some(&tenant)).map_err(map_status)?;
     let limit = q.limit.unwrap_or(50).min(500);
+    let offset = q.offset.unwrap_or(0);
     let (total, nodes) = svc
-        .list_nodes(&tenant, q.owner.as_deref(), q.offset.unwrap_or(0), limit)
+        .list_nodes(&tenant, q.owner.as_deref(), offset, limit)
         .map_err(map_status)?;
-    Ok(Json(serde_json::json!({ "total": total, "nodes": nodes })))
+    // has_more：limit 被截断时调用方能确定性翻页（issue #2）
+    let has_more = offset + nodes.len() < total;
+    Ok(Json(
+        serde_json::json!({ "total": total, "has_more": has_more, "nodes": nodes }),
+    ))
 }
 
 async fn get_node(
@@ -404,6 +416,9 @@ async fn weave_session(
         "fact_nodes": resp.fact_nodes.iter().map(|f| serde_json::json!({
             "node_id": f.node_id, "fact": f.fact, "source_event_ids": f.source_event_ids,
         })).collect::<Vec<_>>(),
+        // 抽象层状态（issue #1）：ok | empty | failed | skipped | disabled，
+        // 客户端可据此区分"确实无事实"与"LLM 调用失败"
+        "abstract_status": resp.abstract_status,
     })))
 }
 
@@ -424,6 +439,7 @@ async fn resonate(
                 query: b.query,
                 context: ctx(b.task, b.emotion_valence, b.max_hops),
                 budget: b.budget.unwrap_or(0),
+                top_k: b.top_k.unwrap_or(0),
             },
         ))
         .await

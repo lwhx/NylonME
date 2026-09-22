@@ -71,6 +71,10 @@ NYLON_EMBED_URL=http://localhost:11434 NYLON_EMBED_MODEL=bge-m3 NYLON_EMBED_DIMS
 ./nylon-engine serve 0.0.0.0:50051
 ```
 
+> Windows note: when a **system proxy** is enabled, the HTTP client may route even
+> `http://127.0.0.1:11434` through the proxy and ollama returns `502 Bad Gateway`.
+> Use `http://localhost:11434` instead — proxy bypass lists match `localhost`.
+
 Optional understanding layer (session-level fact weaving with any OpenAI-compatible chat model):
 
 ```bash

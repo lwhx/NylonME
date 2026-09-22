@@ -190,6 +190,7 @@ async fn grpc_roundtrip() {
                 max_hops: None,
             }),
             budget: 16,
+            top_k: 0,
         })
         .await
         .unwrap()
@@ -296,6 +297,7 @@ async fn grpc_with_stub_embedder() {
             query: "航班".into(),
             context: None,
             budget: 8,
+            top_k: 0,
         })
         .await
         .unwrap()

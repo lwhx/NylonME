@@ -76,6 +76,7 @@ async fn main() {
             query: "部署在哪个机器上".into(),
             context: ctx(),
             budget: 8,
+            top_k: 0,
         })
         .await
         .unwrap()

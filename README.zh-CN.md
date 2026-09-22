@@ -162,6 +162,9 @@ RocksDB 支持周期快照 + WAL 截断（`NYLON_CHECKPOINT_SECS`，默认 600 �
 | `NYLON_RERANK_VEC` | 0 | 查询向量余弦相似度混入共振排序的权重 |
 | `NYLON_TENSION_FLOOR` | 0 | 排序时的张力下限（不改节点状态） |
 | `NYLON_SEED_QUOTA` | 0 | 输出中给直接命中种子的保底前排名额 |
+| `NYLON_LLM_MAX_TOKENS` | 4096 | LLM 输出预算；会话分解 JSON 被截断时调大 |
+| `NYLON_ECHO_DEMOTE` | 关 | (0,1) 区间系数，共振排序时把"查询短回显"节点（如"装一份 ZeroClaw"）降到真正的解释性内容之下 |
+| `NYLON_SESSION_DEDUP` | 关 | weave_session 遇到同 (tenant, owner, 原文) 的事件时复用既有节点——客户端重试/回灌安全 |
 | `NYLON_DERIVED_EDGES` | 关 | 抽象层→叶子的显式边（实测对时序/常识负收益，保持关闭） |
 | `NYLON_WORLD_BRIDGES` / `NYLON_WORLD_BRIDGES_ASYNC` | 关 | 常识世界知识桥接（同步 / 异步反思） |
 | `NYLON_PERSONA_REFLECT` | 关 | 异步反思中的画像节点抽取 |

@@ -57,7 +57,7 @@ async fn main() {
             let query = arg(&args, "--query").expect("--query required");
             let budget: u32 = arg(&args, "--budget").and_then(|s| s.parse().ok()).unwrap_or(8);
             let hops: Option<u32> = arg(&args, "--hops").and_then(|s| s.parse().ok());
-            let r = client.resonate(sign(tonic::Request::new(ResonateRequest { tenant_id: tenant.clone(), owner_id: owner, query, context: ctx(hops), budget }), &api_key)).await.expect("resonate failed").into_inner();
+            let r = client.resonate(sign(tonic::Request::new(ResonateRequest { tenant_id: tenant.clone(), owner_id: owner, query, context: ctx(hops), budget, top_k: budget }), &api_key)).await.expect("resonate failed").into_inner();
             println!("ACTIVATED={}", r.activated.len());
             for n in &r.activated {
                 let g = client.get_node(sign(tonic::Request::new(GetNodeRequest { tenant_id: tenant.clone(), node_id: n.node_id }), &api_key)).await;
