@@ -1,6 +1,6 @@
 # NylonME — A Memory Engine for AI Agents
 
-[简体中文](README.zh-CN.md) | English
+[简体中文](README.zh-CN.md) | English | [nylonme.com](https://www.nylonme.com)
 
 > Single-node memory engine for AI agents: multi-filament memory weaving, mesh memory graph, tension-based forgetting, context resonance.
 > Status: Phase 2 — active development (APIs may still evolve)
@@ -18,11 +18,12 @@ LoCoMo evidence recall@10, full 10-session corpus (1536 answerable QA, lexical +
 | + dual-layer write (leaf turns + session-level LLM facts) | 79.2% |
 | + adaptive resonance depth (Cat4 single-hop queries skip diffusion) | 80.1% |
 | + query-vector rerank of the activated set | 84.6% |
-| + async commonsense reflection (world-knowledge bridges) | **85.4%** |
+| + async commonsense reflection (world-knowledge bridges) | 85.4% |
+| = re-baselined after write-side integrity fix (issue #1) | **85.9%** |
 
-Per-category recall (full corpus): multi-hop 82.6%, temporal 89.4%, commonsense 63.0%, single-hop 87.6%.
+Per-category recall (full corpus): multi-hop 82.3%, temporal 88.8%, commonsense 58.7%, single-hop 89.1%.
 
-End-to-end QA (LLM answers from the retrieved Top-10, judge-scored): paper protocol **75.4%** (Mem0 Appendix A wording), strict protocol **70.1%**. Full method, per-category tables and variance notes in [docs/LOCOMO_BENCHMARK.md](docs/LOCOMO_BENCHMARK.md).
+End-to-end QA (LLM answers from the retrieved Top-10, judge-scored): paper protocol **80.1%** (Mem0 Appendix A wording), strict protocol **74.1%** — with an answer-side anti-abstention prompt (paired A/B on an identical weave: 76.4% → 80.1%; abstentions 163 → 76). Per-category J: multi-hop 68.6%, temporal 78.9%, commonsense 65.2%, single-hop 86.1%. Full method, per-category tables and variance notes in [docs/LOCOMO_BENCHMARK.md](docs/LOCOMO_BENCHMARK.md).
 
 Two design rules the experiments forced on us: the **understanding layer lives on the write side** (the LLM is a compiler that turns raw events into retrievable structure; query-side LLM expansion measured net-zero), and **both layers must coexist** (abstract-layer-only retrieval drops the score to 67.3%).
 
@@ -202,7 +203,7 @@ NylonME/
 
 ## Roadmap
 
-Done: dual-layer write engine (WeaveSession), hybrid lexical+vector seeds, adaptive resonance depth, query-vector rerank, HNSW, RocksDB persistence, gRPC serving, LoCoMo 85.4%, REST/OpenAPI gateway + web console, Python SDK, LangChain/LlamaIndex integrations, tenant isolation (L2.1), API-key auth (L2.2), audit stream (L2.3), periodic snapshot + backup (L2.4), Docker one-command deployment, Helm chart, DSH plugin.
+Done: dual-layer write engine (WeaveSession), hybrid lexical+vector seeds, adaptive resonance depth, query-vector rerank, HNSW, RocksDB persistence, gRPC serving, LoCoMo recall 85.9% / QA 80.1%, REST/OpenAPI gateway + web console, Python SDK, LangChain/LlamaIndex integrations, tenant isolation (L2.1), API-key auth (L2.2), audit stream (L2.3), periodic snapshot + backup (L2.4), Docker one-command deployment, Helm chart, DSH plugin.
 Next: cross-encoder reranker, 1M-node memory profiling, paper & blog series.
 
 ## Contributing

@@ -1,6 +1,6 @@
 # NylonME — 尼龙记忆引擎
 
-[English](README.md) | 简体中文
+[English](README.md) | 简体中文 | [官网 nylonme.com](https://www.nylonme.com)
 
 > 面向 AI Agent 的单机记忆引擎：记忆丝多维修织 · 网状记忆图 · 张力遗忘 · 情境共振
 > 状态：Phase 2 活跃开发中（API 仍可能演进）
@@ -18,11 +18,12 @@ LoCoMo 证据召回 recall@10，全量 10 会话语料（1536 个可答 QA，词
 | +双层写入（叶子层原文 + session 级 LLM 事实） | 79.2% |
 | +自适应联想深度（Cat4 单跳查询不扩散） | 80.1% |
 | +查询向量重排激活集 | 84.6% |
-| +异步常识反思（世界知识桥接） | **85.4%** |
+| +异步常识反思（世界知识桥接） | 85.4% |
+| =写入侧完整性修复后基线复测（issue #1） | **85.9%** |
 
-分类召回（全量）：多跳 82.6%、时序 89.4%、常识 63.0%、单跳 87.6%。
+分类召回（全量）：多跳 82.3%、时序 88.8%、常识 58.7%、单跳 89.1%。
 
-端到端问答（LLM 基于检索到的 Top-10 作答，裁判判定）：论文口径 **75.4%**（Mem0 Appendix A 措辞）、严格口径 **70.1%**。完整方法、分类表与方差说明见 [docs/LOCOMO_BENCHMARK.md](docs/LOCOMO_BENCHMARK.md)。
+端到端问答（LLM 基于检索到的 Top-10 作答，裁判判定）：论文口径 **80.1%**（Mem0 Appendix A 措辞）、严格口径 **74.1%**——作答侧反弃答提示词配对 A/B（同一编织库：76.4% → 80.1%，弃答 163 → 76）。分类 J：多跳 68.6%、时序 78.9%、常识 65.2%、单跳 86.1%。完整方法、分类表与方差说明见 [docs/LOCOMO_BENCHMARK.md](docs/LOCOMO_BENCHMARK.md)。
 
 实验逼出来的两条设计铁律：**理解层在写入侧**（LLM 是记忆的编译器，把原始事件编译成可检索结构；查询侧 LLM 扩展实测净零），以及**两层必须共存**（只用抽象层检索会把分数拉到 67.3%）。
 
@@ -202,7 +203,7 @@ NylonME/
 
 ## 路线图
 
-已完成：双层写入引擎（WeaveSession）、词面+向量混合种子、自适应联想深度、查询向量重排、HNSW、RocksDB 持久化、gRPC 服务化、LoCoMo 85.4%、REST/OpenAPI 网关 + Web 控制台、Python SDK、LangChain/LlamaIndex 集成、租户隔离（L2.1）、API key 鉴权（L2.2）、审计事件流（L2.3）、周期快照与备份（L2.4）、Docker 一键部署、Helm chart、DSH 插件。
+已完成：双层写入引擎（WeaveSession）、词面+向量混合种子、自适应联想深度、查询向量重排、HNSW、RocksDB 持久化、gRPC 服务化、LoCoMo 召回 85.9% / 问答 80.1%、REST/OpenAPI 网关 + Web 控制台、Python SDK、LangChain/LlamaIndex 集成、租户隔离（L2.1）、API key 鉴权（L2.2）、审计事件流（L2.3）、周期快照与备份（L2.4）、Docker 一键部署、Helm chart、DSH 插件。
 下一步：交叉编码器 reranker、百万节点内存 profiling、论文与博客系列。
 
 ## 贡献
