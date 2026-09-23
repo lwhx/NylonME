@@ -43,14 +43,52 @@ try {
 </header>
 
 <nav class="tabs">
-  <button class="tab active" data-view="memories" id="tab-memories" data-i18n="tab.memories">Memories</button>
+  <button class="tab active" data-view="overview" id="tab-overview" data-i18n="tab.overview">Overview</button>
+  <button class="tab" data-view="memories" id="tab-memories" data-i18n="tab.memories">Memories</button>
+  <button class="tab" data-view="graph" id="tab-graph" data-i18n="tab.graph">Graph</button>
   <button class="tab" data-view="resonate" id="tab-resonate" data-i18n="tab.resonate">Resonate</button>
   <button class="tab" data-view="weave" id="tab-weave" data-i18n="tab.weave">Weave</button>
   <button class="tab" data-view="audit" id="tab-audit" data-i18n="tab.audit">Audit</button>
 </nav>
 
 <main>
-  <section id="view-memories" class="view active">
+  <section id="view-overview" class="view active">
+    <div class="ov-cards">
+      <div class="ov-card">
+        <div class="ov-num" id="ov-nodes">–</div>
+        <div class="ov-label" data-i18n="ov.nodes">memory nodes</div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-num" id="ov-edges">–</div>
+        <div class="ov-label" data-i18n="ov.edges">graph edges</div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-num" id="ov-embed">–</div>
+        <div class="ov-label" data-i18n="ov.embed">embedding channel</div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-num" id="ov-llm">–</div>
+        <div class="ov-label" data-i18n="ov.llm">LLM weave channel</div>
+      </div>
+    </div>
+    <div class="ov-cols">
+      <div class="panel">
+        <h3 data-i18n="ov.recent">Latest memories</h3>
+        <div id="ov-memories" class="ov-list"></div>
+      </div>
+      <div class="panel">
+        <h3 data-i18n="ov.activity">Recent activity</h3>
+        <div id="ov-activity" class="ov-list"></div>
+      </div>
+      <div class="panel">
+        <h3 data-i18n="ov.tension">Tension distribution</h3>
+        <canvas id="ov-hist" width="360" height="140"></canvas>
+        <div class="muted" id="ov-hist-note"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-memories" class="view">
     <div class="toolbar">
       <input id="mem-filter" type="search" data-i18n-ph="ph.filter" placeholder="filter facts…" spellcheck="false">
       <select id="mem-scope">
@@ -72,6 +110,26 @@ try {
     <div class="empty muted" id="mem-empty" hidden data-i18n="mem.empty">no memories found</div>
   </section>
 
+  <section id="view-graph" class="view">
+    <div class="toolbar">
+      <select id="graph-limit" data-i18n-title="tip.graphLimit" title="max nodes in view">
+        <option value="100" data-i18n="graph.n100">100 nodes</option>
+        <option value="300" selected data-i18n="graph.n300">300 nodes</option>
+        <option value="600" data-i18n="graph.n600">600 nodes</option>
+      </select>
+      <select id="graph-color">
+        <option value="tension" data-i18n="graph.byTension">color: tension</option>
+        <option value="owner" data-i18n="graph.byOwner">color: owner</option>
+      </select>
+      <button id="graph-refresh" class="btn" data-i18n-title="tip.reload" title="reload" data-i18n="btn.refresh">Refresh</button>
+      <span class="muted" id="graph-meta"></span>
+    </div>
+    <div class="graph-wrap">
+      <canvas id="graph-canvas"></canvas>
+      <div class="graph-tip mono" id="graph-tip" hidden></div>
+    </div>
+  </section>
+
   <section id="view-resonate" class="view">
     <div class="form-row">
       <input id="res-query" type="text" data-i18n-ph="ph.query" placeholder="query — e.g. flight seat preference" spellcheck="false">
@@ -87,6 +145,13 @@ try {
     </div>
     <div class="muted" id="res-meta"></div>
     <div id="res-results" class="cards"></div>
+    <div id="res-feedback" class="feedback-bar" hidden>
+      <span class="muted" data-i18n="fb.prompt">Did this answer well?</span>
+      <button class="btn fb" data-rating="down" data-i18n="fb.down">not helpful</button>
+      <button class="btn fb" data-rating="wrong" data-i18n="fb.wrong">wrong answer</button>
+      <button class="btn fb" data-rating="insufficient" data-i18n="fb.insufficient">missing info</button>
+      <span class="muted" id="fb-status"></span>
+    </div>
   </section>
 
   <section id="view-weave" class="view">
@@ -137,7 +202,10 @@ try {
 <aside id="drawer" class="drawer" hidden>
   <div class="drawer-head">
     <span><span data-i18n="drawer.node">Node</span> <b id="d-id" class="mono"></b></span>
-    <button id="d-close" class="btn icon" data-i18n-title="tip.close" title="close">×</button>
+    <span>
+      <button id="d-delete" class="btn danger" data-i18n-title="tip.delete" title="forget this node (tombstone)" data-i18n="btn.delete">Forget</button>
+      <button id="d-close" class="btn icon" data-i18n-title="tip.close" title="close">×</button>
+    </span>
   </div>
   <div class="drawer-body" id="d-body"></div>
 </aside>

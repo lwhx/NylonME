@@ -147,6 +147,124 @@
             }
           }
         }
+      },
+      "delete": {
+        "summary": "Forget a node (tombstone; write scope)",
+        "operationId": "deleteNode",
+        "description": "Logically deletes the node and its outgoing edges. Tombstoned nodes are invisible to list/get/resonate/search; physical removal happens on compaction. Cross-tenant deletes return 404 without exposing existence.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "default"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deletion result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Node not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graph": {
+      "get": {
+        "summary": "Graph view for visualization (latest N nodes + internal edges)",
+        "operationId": "graphView",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "default"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 300,
+              "maximum": 1000
+            },
+            "description": "Max nodes returned (newest first). Edges are kept only when both endpoints are in the returned set."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Graph view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "description": "Total live nodes in the tenant (may exceed nodes.length when truncated)"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "integer" },
+                          "owner_id": { "type": "string" },
+                          "fact": { "type": "string" },
+                          "tension": { "type": "number" },
+                          "created_at": { "type": "integer" }
+                        }
+                      }
+                    },
+                    "edges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from": { "type": "integer" },
+                          "to": { "type": "integer" },
+                          "weight": { "type": "number" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/audit": {

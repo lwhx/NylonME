@@ -63,7 +63,7 @@ dsh plugin --profile web add <nylon/plugins/dsh-nylonme-memory>
 
 ![NylonME Console](docs/ui-console-zh.png)
 
-浏览记忆（实时张力）、调试共振查询（种子、分数、自适应深度）、手工写入记忆——与 gRPC/MCP 同一个引擎、同一条写路径。REST 端点与 gRPC 契约一一对应，规范见 [docs/api/openapi.json](docs/api/openapi.json)。内置深色/浅色主题和中英文界面切换。
+六个视图：**总览**（统计卡片、最新记忆、活动流、张力分布直方图）、**记忆**（浏览/过滤，实时张力）、**图谱**（零依赖力导向记忆网络图——引擎核心叙事的可视化）、**共振**（调试查询：种子、分数、自适应深度）带一键回答质量反馈条（驱动空闲反思）、**编织**（单条 + 会话批量）、**审计**。节点抽屉内置**遗忘**操作（`DELETE /v1/nodes/{id}` 打墓碑）。与 gRPC/MCP 同一个引擎、同一条写路径。REST 端点与 gRPC 契约一一对应，规范见 [docs/api/openapi.json](docs/api/openapi.json)。内置深色/浅色主题和中英文界面切换。
 
 ## 多租户与鉴权
 

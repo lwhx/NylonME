@@ -351,6 +351,34 @@ async fn get_node(
     })))
 }
 
+/// 图可视化视图（Graph 页）：tenant 内最新节点 + 内部边。
+async fn graph_view(
+    State(svc): State<EngineService>,
+    headers: HeaderMap,
+    Query(q): Query<ListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant = q.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.into());
+    http_authorize(svc.auth(), &headers, Scope::Read, Some(&tenant)).map_err(map_status)?;
+    let limit = q.limit.unwrap_or(300).min(1000);
+    let view = svc.graph_view(&tenant, limit).map_err(map_status)?;
+    Ok(Json(view))
+}
+
+/// 删除节点（"遗忘"）。写档位；跨租户按不存在处理。
+async fn delete_node(
+    State(svc): State<EngineService>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+    Query(q): Query<ListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant = q.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.into());
+    http_authorize(svc.auth(), &headers, Scope::Write, Some(&tenant)).map_err(map_status)?;
+    let local = u32::try_from(id)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "node_id 超出局部 ID 范围".into()))?;
+    let deleted = svc.remove_node(&tenant, local).await.map_err(map_status)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
 async fn weave(
     State(svc): State<EngineService>,
     headers: HeaderMap,
@@ -524,7 +552,8 @@ pub fn router(svc: EngineService) -> Router {
         .route("/openapi.json", get(openapi))
         .route("/v1/stats", get(stats))
         .route("/v1/nodes", get(list_nodes))
-        .route("/v1/nodes/{id}", get(get_node))
+        .route("/v1/nodes/{id}", get(get_node).delete(delete_node))
+        .route("/v1/graph", get(graph_view))
         .route("/v1/audit", get(audit_events))
         .route("/v1/checkpoint", post(checkpoint_now))
         .route("/v1/weave", post(weave))

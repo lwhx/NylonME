@@ -14,6 +14,9 @@
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* hidden 属性必须压过组件的 display 规则（.drawer/.feedback-bar 都是 flex），
+   否则抽屉和反馈条会一直可见、挡住顶栏按钮 */
+[hidden] { display: none !important; }
 body {
   background: var(--bg); color: var(--text);
   font: 14px/1.5 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -119,6 +122,48 @@ main { flex: 1; overflow: auto; padding: 16px; }
 .weave-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1100px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
 .panel h3 { font-size: 13px; margin-bottom: 10px; }
+
+/* overview */
+.ov-cards { display: grid; grid-template-columns: repeat(4, minmax(140px, 210px)); gap: 12px; margin-bottom: 16px; }
+.ov-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.ov-num { font: 600 24px var(--mono); color: var(--accent); }
+.ov-num.off { color: var(--muted); }
+.ov-label { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.ov-cols { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 16px; align-items: start; }
+.ov-list { display: flex; flex-direction: column; }
+.ov-item {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 7px 6px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer;
+}
+.ov-item:last-child { border-bottom: none; }
+.ov-item:hover { background: var(--panel-2); }
+.ov-item .muted { flex: none; }
+#ov-activity .ov-item { cursor: default; }
+#ov-activity .ov-item:hover { background: none; }
+
+/* graph view */
+.graph-wrap {
+  position: relative; overflow: hidden;
+  height: calc(100vh - var(--topbar-h) - 130px);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+}
+#graph-canvas { display: block; }
+.graph-tip {
+  position: absolute; pointer-events: none; z-index: 5;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; max-width: 340px; line-height: 1.5;
+}
+
+/* resonate feedback bar */
+.feedback-bar {
+  display: flex; align-items: center; gap: 8px; margin-top: 14px;
+  padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+}
+.btn.fb { font-size: 12px; padding: 4px 10px; }
+.btn.fb:hover { border-color: var(--amber); color: var(--amber); }
+
+.btn.danger { color: var(--danger); margin-right: 6px; }
+.btn.danger:hover { border-color: var(--danger); }
 .result {
   margin-top: 10px; background: var(--panel-2); border: 1px solid var(--border);
   border-radius: 6px; padding: 10px; font-size: 13px;
@@ -153,6 +198,8 @@ main { flex: 1; overflow: auto; padding: 16px; }
   .weave-cols { grid-template-columns: 1fr; }
   .drawer { width: 100%; }
   .stats { display: none; }
+  .ov-cols { grid-template-columns: 1fr; }
+  .ov-cards { grid-template-columns: repeat(2, 1fr); }
 }
 /* light theme */
 :root[data-theme="light"] {

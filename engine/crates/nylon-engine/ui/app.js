@@ -7,8 +7,21 @@ const $ = (id) => document.getElementById(id);
 const I18N = {
   en: {
     "stats.nodes": "nodes", "stats.edges": "edges",
-    "tab.memories": "Memories", "tab.resonate": "Resonate", "tab.weave": "Weave",
+    "tab.overview": "Overview", "tab.memories": "Memories", "tab.graph": "Graph",
+    "tab.resonate": "Resonate", "tab.weave": "Weave",
     "tab.audit": "Audit",
+    "ov.nodes": "memory nodes", "ov.edges": "graph edges",
+    "ov.embed": "embedding channel", "ov.llm": "LLM weave channel",
+    "ov.recent": "Latest memories", "ov.activity": "Recent activity", "ov.tension": "Tension distribution",
+    "ov.empty": "no data yet",
+    "graph.n100": "100 nodes", "graph.n300": "300 nodes", "graph.n600": "600 nodes",
+    "graph.byTension": "color: tension", "graph.byOwner": "color: owner",
+    "graph.empty": "no nodes to display — weave some memories first",
+    "tip.graphLimit": "max nodes in view (latest first)",
+    "btn.delete": "Forget",
+    "tip.delete": "forget this node (tombstone; restorable only from backup)",
+    "fb.prompt": "Did this answer well?",
+    "fb.down": "not helpful", "fb.wrong": "wrong answer", "fb.insufficient": "missing info",
     "audit.allActions": "all actions", "audit.empty": "no audit events",
     "th.time": "Time", "th.action": "Action", "th.tenant": "Tenant", "th.owner": "Owner", "th.detail": "Detail",
     "scope.all": "all owners", "scope.mine": "current owner",
@@ -38,6 +51,11 @@ const I18N = {
     embedOn: (d) => `embed ${d}d`, embedOff: "embed off",
     llmOn: "llm on", llmOff: "llm off",
     memTotal: (n) => `${n} nodes`,
+    graphMeta: (s, tot, e) => `${s}/${tot} nodes · ${e} edges`,
+    ovHistNote: (tot, shown) => shown < tot ? `latest ${shown} of ${tot} nodes` : `${tot} nodes`,
+    delConfirm: (id) => `Forget node #${id}? The node and its edges will be tombstoned.`,
+    delDone: (id) => `node #${id} forgotten`,
+    fbThanks: "feedback recorded — steers idle reflection",
     resRunning: "resonating…",
     resMeta: (n, seeds) => `${n} activated · seeds [${seeds}]`,
     resEmpty: "nothing resonated",
@@ -53,8 +71,21 @@ const I18N = {
   },
   zh: {
     "stats.nodes": "节点", "stats.edges": "边",
-    "tab.memories": "记忆", "tab.resonate": "共振", "tab.weave": "编织",
+    "tab.overview": "总览", "tab.memories": "记忆", "tab.graph": "图谱",
+    "tab.resonate": "共振", "tab.weave": "编织",
     "tab.audit": "审计",
+    "ov.nodes": "记忆节点", "ov.edges": "图边",
+    "ov.embed": "向量通道", "ov.llm": "LLM 编织通道",
+    "ov.recent": "最新记忆", "ov.activity": "最近活动", "ov.tension": "张力分布",
+    "ov.empty": "暂无数据",
+    "graph.n100": "100 节点", "graph.n300": "300 节点", "graph.n600": "600 节点",
+    "graph.byTension": "着色：张力", "graph.byOwner": "着色：归属",
+    "graph.empty": "没有可显示的节点——先编织一些记忆吧",
+    "tip.graphLimit": "视图内最大节点数（按最新优先）",
+    "btn.delete": "遗忘",
+    "tip.delete": "遗忘此节点（打墓碑；只能从备份恢复）",
+    "fb.prompt": "这次回答有用吗？",
+    "fb.down": "没帮助", "fb.wrong": "答错了", "fb.insufficient": "信息不足",
     "audit.allActions": "全部动作", "audit.empty": "暂无审计事件",
     "th.time": "时间", "th.action": "动作", "th.tenant": "租户", "th.owner": "归属", "th.detail": "细节",
     "scope.all": "全部 owner", "scope.mine": "仅当前 owner",
@@ -84,6 +115,11 @@ const I18N = {
     embedOn: (d) => `向量 ${d}d`, embedOff: "向量关闭",
     llmOn: "LLM 开", llmOff: "LLM 关",
     memTotal: (n) => `${n} 条记忆`,
+    graphMeta: (s, tot, e) => `${s}/${tot} 节点 · ${e} 边`,
+    ovHistNote: (tot, shown) => shown < tot ? `最新 ${shown} / 共 ${tot} 节点` : `共 ${tot} 节点`,
+    delConfirm: (id) => `确定遗忘节点 #${id}？节点与其边将被打上墓碑。`,
+    delDone: (id) => `节点 #${id} 已遗忘`,
+    fbThanks: "反馈已记录——将驱动空闲反思定向补强",
     resRunning: "共振中…",
     resMeta: (n, seeds) => `激活 ${n} 条 · 种子 [${seeds}]`,
     resEmpty: "没有共振到记忆",
@@ -135,6 +171,7 @@ $("theme-toggle").addEventListener("click", () => {
   if (light) rootEl.dataset.theme = "light";
   else rootEl.removeAttribute("data-theme");
   localStorage.setItem("nylon.theme", light ? "light" : "dark");
+  if (gsim) gsim.colors = graphColors();
 });
 
 /* ---------- owner ---------- */
@@ -158,12 +195,14 @@ keyEl.addEventListener("change", () => {
   loadMemories();
 });
 
-async function api(path, body) {
+async function api(path, body, method) {
   const key = keyEl.value.trim();
   const authH = key ? { "x-api-key": key } : {};
-  const opts = body === undefined
-    ? { method: "GET", headers: authH }
-    : { method: "POST", headers: { ...authH, "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const opts = method === "DELETE"
+    ? { method: "DELETE", headers: authH }
+    : body === undefined
+      ? { method: "GET", headers: authH }
+      : { method: "POST", headers: { ...authH, "Content-Type": "application/json" }, body: JSON.stringify(body) };
   const r = await fetch(path, opts);
   const data = await r.json().catch(() => ({}));
   if (r.status === 401) {
@@ -204,6 +243,9 @@ document.querySelectorAll(".tab").forEach((b) =>
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === b));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + b.dataset.view));
     if (b.dataset.view === "audit") loadAudit();
+    if (b.dataset.view === "overview") loadOverview();
+    if (b.dataset.view === "graph") loadGraph();
+    else stopSim();
   })
 );
 
@@ -289,10 +331,12 @@ $("mem-prev").addEventListener("click", () => { if (state.page > 0) { state.page
 $("mem-next").addEventListener("click", () => { if ((state.page + 1) * PAGE < state.total) { state.page++; loadMemories(); } });
 
 /* ---------- drawer ---------- */
+let drawerNodeId = null;
 async function openDrawer(id) {
   try {
     const n = await api(`/v1/nodes/${id}`);
     const f = n.filaments || {};
+    drawerNodeId = n.node_id;
     $("d-id").textContent = "#" + n.node_id;
     $("d-body").innerHTML = `
       <div class="d-fact">${esc(f.fact || "")}</div>
@@ -342,6 +386,10 @@ $("res-run").addEventListener("click", async () => {
       </div>`).join("") || `<div class="empty muted">${t("resEmpty")}</div>`;
     document.querySelectorAll("#res-results .card").forEach((c) =>
       c.addEventListener("click", () => openDrawer(+c.dataset.id)));
+    // 记录本次检索上下文，展示反馈条（回答质量回执 → 反馈驱动反思）
+    lastResonate = { query: q, shown: d.activated.map((a) => a.node_id) };
+    $("res-feedback").hidden = false;
+    $("fb-status").textContent = "";
   } catch (e) { $("res-meta").textContent = ""; toast(e.message); }
 });
 $("res-query").addEventListener("keydown", (e) => { if (e.key === "Enter") $("res-run").click(); });
@@ -383,6 +431,296 @@ $("ws-run").addEventListener("click", async () => {
   } catch (e) { toast(e.message); }
 });
 
+/* ---------- overview ---------- */
+async function loadOverview() {
+  try {
+    const s = await api("/v1/stats");
+    $("ov-nodes").textContent = s.nodes;
+    $("ov-edges").textContent = s.edges;
+    const oe = $("ov-embed"), ol = $("ov-llm");
+    oe.textContent = s.embedder ? `${s.embed_dims}d` : "off";
+    oe.classList.toggle("off", !s.embedder);
+    ol.textContent = s.llm ? "on" : "off";
+    ol.classList.toggle("off", !s.llm);
+  } catch (e) { /* keep placeholders */ }
+  try {
+    const d = await api("/v1/nodes?limit=8");
+    $("ov-memories").innerHTML = d.nodes.map((n) => `
+      <div class="ov-item" data-id="${n.id}">
+        <span class="fact-cell">${esc(n.fact)}</span>
+        <span class="muted">${timeAgo(n.created_at)}</span>
+      </div>`).join("") || `<div class="empty muted">${t("ov.empty")}</div>`;
+    $("ov-memories").querySelectorAll(".ov-item").forEach((el) =>
+      el.addEventListener("click", () => openDrawer(+el.dataset.id)));
+  } catch (e) { /* auth/offline */ }
+  try {
+    const d = await api("/v1/audit?limit=8");
+    const rows = d.events || [];
+    $("ov-activity").innerHTML = rows.map((e) => `
+      <div class="ov-item">
+        <span class="fact-cell"><span class="rel-chip${e.action === "denied" ? " denied" : ""}">${esc(e.action)}</span> ${esc(e.detail)}</span>
+        <span class="muted">${timeAgo(e.ts)}</span>
+      </div>`).join("") || `<div class="empty muted">${t("ov.empty")}</div>`;
+  } catch (e) { /* auth/offline */ }
+  try {
+    const d = await api("/v1/nodes?limit=500");
+    drawHist(d.nodes.map((n) => n.tension));
+    $("ov-hist-note").textContent = t("ovHistNote")(d.total, d.nodes.length);
+  } catch (e) { /* auth/offline */ }
+}
+
+function drawHist(tensions) {
+  const c = $("ov-hist");
+  const ctx = c.getContext("2d");
+  const W = 360, H = 140, dpr = window.devicePixelRatio || 1;
+  c.width = W * dpr; c.height = H * dpr;
+  c.style.width = W + "px"; c.style.height = H + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue("--accent").trim() || "#2dd4bf";
+  const muted = css.getPropertyValue("--muted").trim() || "#8b929e";
+  ctx.clearRect(0, 0, W, H);
+  const B = 10, buckets = new Array(B).fill(0);
+  tensions.forEach((v) => buckets[Math.min(B - 1, Math.max(0, Math.floor(v * B)))]++);
+  const max = Math.max(...buckets, 1);
+  const bw = (W - 20) / B;
+  ctx.fillStyle = accent;
+  buckets.forEach((v, i) => {
+    const h = (H - 36) * v / max;
+    ctx.globalAlpha = v ? 0.9 : 0.12;
+    ctx.fillRect(10 + i * bw + 2, H - 24 - h, bw - 4, Math.max(h, 1));
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = muted;
+  ctx.font = "10px sans-serif";
+  ctx.fillText("0", 10, H - 8);
+  ctx.fillText("tension →", W / 2 - 22, H - 8);
+  const t1 = "1.0";
+  ctx.fillText(t1, W - 10 - ctx.measureText(t1).width, H - 8);
+}
+
+/* ---------- graph view ---------- */
+const gcanvas = $("graph-canvas");
+const gtip = $("graph-tip");
+let gsim = null;
+
+const OWNER_HUES = [174, 36, 265, 330, 110, 200, 15, 80, 290, 130];
+
+function graphColors() {
+  const css = getComputedStyle(document.documentElement);
+  return {
+    edge: css.getPropertyValue("--muted").trim() || "#8b929e",
+    text: css.getPropertyValue("--text").trim() || "#e6e8eb",
+  };
+}
+
+async function loadGraph() {
+  stopSim();
+  try {
+    const limit = +$("graph-limit").value || 300;
+    const d = await api(`/v1/graph?limit=${limit}`);
+    $("graph-meta").textContent = t("graphMeta")(d.nodes.length, d.total, d.edges.length);
+    if (!d.nodes.length) {
+      $("graph-meta").textContent = t("graph.empty");
+      return;
+    }
+    startSim(d);
+  } catch (e) { toast(e.message); }
+}
+
+function stopSim() {
+  if (gsim && gsim.raf) cancelAnimationFrame(gsim.raf);
+  gsim = null;
+  if (gtip) gtip.hidden = true;
+}
+
+function startSim(data) {
+  const wrap = gcanvas.parentElement;
+  const W = Math.max(300, wrap.clientWidth);
+  const H = Math.max(320, wrap.clientHeight);
+  const dpr = window.devicePixelRatio || 1;
+  gcanvas.width = W * dpr; gcanvas.height = H * dpr;
+  gcanvas.style.width = W + "px"; gcanvas.style.height = H + "px";
+  //  owner → hue 映射（按出现顺序取色板）
+  const ownerHues = new Map();
+  data.nodes.forEach((n) => {
+    if (!ownerHues.has(n.owner_id)) ownerHues.set(n.owner_id, OWNER_HUES[ownerHues.size % OWNER_HUES.length]);
+  });
+  const nodes = data.nodes.map((n, i) => ({
+    ...n,
+    // 初始位置：类叶序散布，避免全部叠在圆心
+    x: W / 2 + Math.cos(i * 2.4) * (30 + 8 * Math.sqrt(i)),
+    y: H / 2 + Math.sin(i * 2.4) * (30 + 8 * Math.sqrt(i)),
+    vx: 0, vy: 0,
+  }));
+  const idx = new Map(nodes.map((n, i) => [n.id, i]));
+  const edges = data.edges
+    .map((e) => ({ a: idx.get(e.from), b: idx.get(e.to), w: e.weight }))
+    .filter((e) => e.a !== undefined && e.b !== undefined);
+  gsim = { nodes, edges, W, H, dpr, hover: -1, drag: -1, moved: false, colors: graphColors(), ownerHues };
+  gsim.raf = requestAnimationFrame(stepSim);
+}
+
+function colorOfNode(p) {
+  if ($("graph-color").value === "owner") {
+    return `hsl(${gsim.ownerHues.get(p.owner_id) ?? 174} 60% 55%)`;
+  }
+  const v = Math.max(0, Math.min(1, p.tension));
+  return `hsl(${174 - v * 138} 65% 50%)`; // 低张力 teal → 高张力 amber
+}
+
+function stepSim() {
+  if (!gsim) return;
+  const { nodes, edges, W, H } = gsim;
+  const n = nodes.length;
+  // 斥力（截断半径 200px，O(n²) 在 600 节点内可接受）
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < n; j++) {
+      const b = nodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      const d2 = dx * dx + dy * dy + 0.01;
+      if (d2 > 40000) continue;
+      const d = Math.sqrt(d2);
+      const f = 900 / d2;
+      dx /= d; dy /= d;
+      a.vx += dx * f; a.vy += dy * f;
+      b.vx -= dx * f; b.vy -= dy * f;
+    }
+  }
+  // 弹簧（边权越重越紧）
+  for (const e of edges) {
+    const a = nodes[e.a], b = nodes[e.b];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+    const f = (d - 70) * 0.02 * Math.min(1, e.w + 0.2);
+    const fx = (dx / d) * f, fy = (dy / d) * f;
+    a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+  }
+  // 向心引力 + 阻尼
+  for (const p of nodes) {
+    p.vx += (W / 2 - p.x) * 0.002;
+    p.vy += (H / 2 - p.y) * 0.002;
+    p.vx *= 0.85; p.vy *= 0.85;
+    if (gsim.drag !== p.id) { p.x += p.vx; p.y += p.vy; }
+  }
+  drawGraph();
+  gsim.raf = requestAnimationFrame(stepSim);
+}
+
+function drawGraph() {
+  const { nodes, edges, W, H, dpr } = gsim;
+  const ctx = gcanvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.lineWidth = 1;
+  for (const e of edges) {
+    const a = nodes[e.a], b = nodes[e.b];
+    ctx.strokeStyle = gsim.colors.edge;
+    ctx.globalAlpha = 0.1 + 0.45 * Math.min(1, e.w);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  for (const p of nodes) {
+    const r = 3.5 + Math.max(0, Math.min(1, p.tension)) * 3.5;
+    ctx.fillStyle = colorOfNode(p);
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 6.2832); ctx.fill();
+    if (p.id === gsim.hover) {
+      ctx.strokeStyle = gsim.colors.text; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r + 2.5, 0, 6.2832); ctx.stroke();
+    }
+  }
+}
+
+function pickNode(x, y) {
+  if (!gsim) return null;
+  let best = null, bestD = 1e9;
+  for (const p of gsim.nodes) {
+    const r = 3.5 + Math.max(0, Math.min(1, p.tension)) * 3.5 + 3;
+    const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+    if (d < r * r && d < bestD) { best = p; bestD = d; }
+  }
+  return best;
+}
+
+gcanvas.addEventListener("mousedown", (e) => {
+  if (!gsim) return;
+  const r = gcanvas.getBoundingClientRect();
+  const p = pickNode(e.clientX - r.left, e.clientY - r.top);
+  if (p) { gsim.drag = p.id; gsim.moved = false; }
+});
+gcanvas.addEventListener("mousemove", (e) => {
+  if (!gsim) return;
+  const r = gcanvas.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (gsim.drag >= 0) {
+    const p = gsim.nodes.find((n) => n.id === gsim.drag);
+    if (p) { p.x = x; p.y = y; p.vx = 0; p.vy = 0; gsim.moved = true; }
+    return;
+  }
+  const p = pickNode(x, y);
+  gsim.hover = p ? p.id : -1;
+  gcanvas.style.cursor = p ? "pointer" : "default";
+  if (p) {
+    gtip.hidden = false;
+    gtip.innerHTML = `<b>#${p.id}</b> · T=${p.tension.toFixed(3)} · ${esc(p.owner_id)}<br>${esc(p.fact)}`;
+    const tw = gtip.offsetWidth, th = gtip.offsetHeight;
+    gtip.style.left = Math.min(x + 14, gsim.W - tw - 8) + "px";
+    gtip.style.top = Math.min(y + 14, gsim.H - th - 8) + "px";
+  } else {
+    gtip.hidden = true;
+  }
+});
+gcanvas.addEventListener("mouseup", (e) => {
+  if (!gsim) return;
+  const wasDrag = gsim.drag >= 0 && gsim.moved;
+  const dragId = gsim.drag;
+  gsim.drag = -1;
+  if (!wasDrag && dragId < 0) {
+    const r = gcanvas.getBoundingClientRect();
+    const p = pickNode(e.clientX - r.left, e.clientY - r.top);
+    if (p) openDrawer(p.id);
+  }
+});
+gcanvas.addEventListener("mouseleave", () => {
+  if (!gsim) return;
+  gsim.drag = -1; gsim.hover = -1; gtip.hidden = true;
+});
+$("graph-refresh").addEventListener("click", loadGraph);
+$("graph-limit").addEventListener("change", loadGraph);
+$("graph-color").addEventListener("change", () => { if (gsim) gsim.colors = graphColors(); });
+
+/* ---------- resonate feedback ---------- */
+let lastResonate = null;
+document.querySelectorAll("#res-feedback .fb").forEach((b) =>
+  b.addEventListener("click", async () => {
+    if (!lastResonate) return;
+    try {
+      await api("/v1/feedback", {
+        owner_id: owner(),
+        query: lastResonate.query,
+        rating: b.dataset.rating,
+        shown_node_ids: lastResonate.shown,
+      });
+      $("fb-status").textContent = t("fbThanks");
+    } catch (e) { toast(e.message); }
+  })
+);
+
+/* ---------- drawer delete ---------- */
+$("d-delete").addEventListener("click", async () => {
+  if (drawerNodeId == null) return;
+  if (!confirm(t("delConfirm")(drawerNodeId))) return;
+  try {
+    await api(`/v1/nodes/${drawerNodeId}`, null, "DELETE");
+    toast(t("delDone")(drawerNodeId));
+    $("drawer").hidden = true;
+    drawerNodeId = null;
+    loadStats(); loadMemories();
+    if (gsim) loadGraph();
+  } catch (e) { toast(e.message); }
+});
+
 /* deep link: /#resonate or /#weave opens that view */
 if (location.hash) {
   const v = location.hash.slice(1);
@@ -393,3 +731,4 @@ if (location.hash) {
 applyI18n();
 loadStats();
 loadMemories();
+loadOverview();

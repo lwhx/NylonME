@@ -475,6 +475,31 @@ pub struct EngineStats {
     pub llm: bool,
 }
 
+/// 图可视化视图（UI Graph 页）：tenant 内最新一批节点 + 集合内部边。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GraphView {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    /// tenant 内节点总数（可能被 limit 截断，供 UI 提示）。
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GraphNode {
+    pub id: u32,
+    pub owner_id: String,
+    pub fact: String,
+    pub tension: f32,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GraphEdge {
+    pub from: u32,
+    pub to: u32,
+    pub weight: f32,
+}
+
 impl EngineService {
     /// 分页列出节点（按创建时间倒序），按 tenant 强制过滤，可选叠加 owner 过滤。
     pub(crate) fn list_nodes(
@@ -540,6 +565,78 @@ impl EngineService {
             .map_err(|e| Status::internal(format!("checkpoint: {e}")))?;
         self.audit_op("checkpoint", "", "", "snapshot + wal truncate".into());
         Ok(())
+    }
+
+    /// 图可视化视图：按创建时间取 tenant 内最新 limit 个节点，边只保留两端都在集合内的。
+    pub(crate) fn graph_view(&self, tenant: &str, limit: usize) -> Result<GraphView, Status> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| Status::internal("state lock poisoned"))?;
+        let now = now_secs();
+        let mut nodes: Vec<GraphNode> = inner
+            .store
+            .graph()
+            .live_nodes()
+            .filter(|(_, n)| n.tenant_id == tenant)
+            .map(|(id, n)| GraphNode {
+                id,
+                owner_id: n.owner_id.clone(),
+                fact: n.filaments.fact.chars().take(120).collect(),
+                tension: compute_tension(n, now, 1.0),
+                created_at: n.filaments.created_at,
+            })
+            .collect();
+        nodes.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        let total = nodes.len();
+        nodes.truncate(limit);
+        let keep: std::collections::HashSet<u32> = nodes.iter().map(|n| n.id).collect();
+        let edges = inner
+            .store
+            .graph()
+            .edges()
+            .into_iter()
+            .filter(|(f, t, _)| keep.contains(f) && keep.contains(t))
+            .map(|(from, to, weight)| GraphEdge { from, to, weight })
+            .collect();
+        Ok(GraphView {
+            nodes,
+            edges,
+            total,
+        })
+    }
+
+    /// 删除节点（产品语义 = "遗忘"）：校验租户归属后打墓碑，WAL 落盘后返回。
+    /// 跨租户删除按不存在处理，不暴露节点存在性（与 get_node 同一策略）。
+    pub(crate) async fn remove_node(&self, tenant: &str, id: u32) -> Result<bool, Status> {
+        let (existed, ticket) = {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| Status::internal("state lock poisoned"))?;
+            let node = inner
+                .store
+                .graph()
+                .get_node(id)
+                .ok_or_else(|| Status::not_found(format!("node {id} 不存在或已删除")))?;
+            if node.tenant_id != tenant {
+                return Err(Status::not_found(format!("node {id} 不存在或已删除")));
+            }
+            let owner = node.owner_id.clone();
+            let (existed, ticket) = inner
+                .store
+                .remove_node(id)
+                .map_err(|e| Status::internal(format!("remove_node: {e}")))?;
+            self.audit_op("delete_node", tenant, &owner, format!("node={id}"));
+            (existed, ticket)
+        };
+        if existed {
+            tokio::task::spawn_blocking(move || ticket.wait())
+                .await
+                .map_err(|e| Status::internal(format!("durability wait: {e}")))?
+                .map_err(|e| Status::internal(format!("wal: {e}")))?;
+        }
+        Ok(existed)
     }
 }
 
@@ -2703,6 +2800,57 @@ mod tests {
             }))
             .await;
         assert!(ok.is_ok());
+    }
+
+    /// 节点删除（"遗忘"）：本租户可删、跨租户按不存在、删后列表与读取均不可见。
+    #[tokio::test]
+    async fn remove_node_tenant_scoped() {
+        let (svc, _emb) = svc_with_embed(64);
+        let a_id = weave_as(&svc, "tenant-a", "alice", "将被遗忘的事实").await;
+
+        // 跨租户删除：按不存在处理，不暴露存在性
+        let err = svc.remove_node("tenant-b", a_id as u32).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        // 本租户删除成功；重复删除按不存在处理
+        assert!(svc.remove_node("tenant-a", a_id as u32).await.unwrap());
+        assert!(svc.remove_node("tenant-a", a_id as u32).await.is_err());
+
+        // 删除后列表与读取均不可见
+        let (total, _) = svc.list_nodes("tenant-a", None, 0, 50).unwrap();
+        assert_eq!(total, 0);
+        let err = svc
+            .get_node(Request::new(GetNodeRequest {
+                tenant_id: "tenant-a".into(),
+                node_id: a_id,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    /// 图可视化视图：只含本租户节点，边两端都在返回集合内，limit 截断生效。
+    #[tokio::test]
+    async fn graph_view_tenant_scoped_and_edge_filtered() {
+        let (svc, _emb) = svc_with_embed(64);
+        let a1 = weave_as(&svc, "tenant-a", "alice", "手冲咖啡笔记").await;
+        let a2 = weave_as(&svc, "tenant-a", "alice", "手冲咖啡进阶").await;
+        let _b1 = weave_as(&svc, "tenant-b", "bob", "tenant-b 的私密记忆").await;
+
+        let view = svc.graph_view("tenant-a", 300).unwrap();
+        assert_eq!(view.total, 2);
+        let ids: std::collections::HashSet<u32> = view.nodes.iter().map(|n| n.id).collect();
+        assert!(ids.contains(&(a1 as u32)) && ids.contains(&(a2 as u32)));
+        assert!(view
+            .edges
+            .iter()
+            .all(|e| ids.contains(&e.from) && ids.contains(&e.to)));
+
+        // limit 截断：total 仍报全集大小，边因端点被截断而过滤
+        let view1 = svc.graph_view("tenant-a", 1).unwrap();
+        assert_eq!(view1.nodes.len(), 1);
+        assert_eq!(view1.total, 2);
+        assert!(view1.edges.is_empty());
     }
 
     /// L2.1：自动建边不跨租户（同关系丝、同 owner、不同 tenant 不得建边）。

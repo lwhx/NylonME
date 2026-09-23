@@ -525,6 +525,7 @@ impl MemoryGraph {
     ///   不同种子经独立路径到达。加分本身由调用方在最终混合打分后应用——图内
     ///   共振分与向量余弦分尺度差异大，在图内加分会被后续 blend 稀释（2026-09-23
     ///   A/B：bonus=0.2 加在图内，recall 变化 ±0.1pp，结构洗脱实锤）。
+    #[allow(clippy::too_many_arguments)] // 共振调参面板：参数即实验旋钮，聚合反而藏语义
     pub fn resonate_opts(
         &self,
         seeds: &[(u32, f32)],
@@ -704,15 +705,32 @@ mod tests {
         g.add_edge(s1, x, 0.9);
         let ctx = ContextSpectrum::default();
         let score_of = |out: &[(u32, f32)], id: u32| {
-            out.iter().find(|&&(n, _)| n == id).map(|&(_, s)| s).unwrap_or(0.0)
+            out.iter()
+                .find(|&&(n, _)| n == id)
+                .map(|&(_, s)| s)
+                .unwrap_or(0.0)
         };
         // 追踪关闭：不返回佐证计数
-        let (off, co_off) =
-            g.resonate_opts(&[(s1, 1.0), (s2, 1.0)], &ctx, 0, DEFAULT_BUDGET, 0.0, 0, 0.0);
+        let (off, co_off) = g.resonate_opts(
+            &[(s1, 1.0), (s2, 1.0)],
+            &ctx,
+            0,
+            DEFAULT_BUDGET,
+            0.0,
+            0,
+            0.0,
+        );
         assert!(co_off.is_empty(), "关闭时不应追踪");
         // 追踪开启：e 被 2 个种子独立到达，x 只有 1 个；分值本身不变
-        let (on, co_on) =
-            g.resonate_opts(&[(s1, 1.0), (s2, 1.0)], &ctx, 0, DEFAULT_BUDGET, 0.0, 0, 0.2);
+        let (on, co_on) = g.resonate_opts(
+            &[(s1, 1.0), (s2, 1.0)],
+            &ctx,
+            0,
+            DEFAULT_BUDGET,
+            0.0,
+            0,
+            0.2,
+        );
         assert_eq!(co_on.get(&e).copied(), Some(2), "共享证据应有 2 个佐证源");
         assert_eq!(co_on.get(&x).copied(), Some(1), "单路径节点应有 1 个佐证源");
         assert!(

@@ -63,7 +63,7 @@ The engine binary also serves a zero-install web console and REST API (default `
 
 ![NylonME Console](docs/ui-console.png)
 
-Browse memories with real-time tension, debug resonance queries (seeds, scores, adaptive depth), and weave new memories by hand — same engine, same write path as gRPC/MCP. REST endpoints mirror the gRPC contract; spec: [docs/api/openapi.json](docs/api/openapi.json). Dark/light themes and an EN/中文 toggle are built in.
+Six views: **Overview** (stats, latest memories, activity stream, tension histogram), **Memories** (browse/filter with real-time tension), **Graph** (zero-dependency force-directed map of the memory web — the engine's core narrative made visible), **Resonate** (debug queries: seeds, scores, adaptive depth) with a one-click answer-quality feedback bar that feeds idle reflection, **Weave** (single + session batch), **Audit**. Node drawer includes a **Forget** action (tombstone via `DELETE /v1/nodes/{id}`). Same engine, same write path as gRPC/MCP. REST endpoints mirror the gRPC contract; spec: [docs/api/openapi.json](docs/api/openapi.json). Dark/light themes and an EN/中文 toggle are built in.
 
 ## Multi-tenancy & Auth
 
