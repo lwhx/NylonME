@@ -157,6 +157,8 @@ struct State {
     score: f32,
     node: u32,
     depth: u8,
+    // 多路径佐证：本条扩散路径的种子来源（用于统计"几个不同种子独立到达同一节点"）
+    origin: u32,
 }
 impl Eq for State {}
 impl Ord for State {
@@ -511,7 +513,7 @@ impl MemoryGraph {
         now: i64,
         budget: usize,
     ) -> Vec<(u32, f32)> {
-        self.resonate_opts(seeds, ctx, now, budget, 0.0, 0)
+        self.resonate_opts(seeds, ctx, now, budget, 0.0, 0, 0.0).0
     }
 
     /// 带排序选项的共振。
@@ -519,6 +521,10 @@ impl MemoryGraph {
     ///   避免老证据被时间衰减挤出前列；
     /// seed_quota：输出中保底靠前的种子名额（按共振强度取前 N 个种子置顶），
     ///   防止直接命中的种子被高张力扩散邻居挤掉。
+    /// multipath_bonus>0 时启用多路径佐证追踪：返回的 map 记录每个节点被多少个
+    ///   不同种子经独立路径到达。加分本身由调用方在最终混合打分后应用——图内
+    ///   共振分与向量余弦分尺度差异大，在图内加分会被后续 blend 稀释（2026-09-23
+    ///   A/B：bonus=0.2 加在图内，recall 变化 ±0.1pp，结构洗脱实锤）。
     pub fn resonate_opts(
         &self,
         seeds: &[(u32, f32)],
@@ -527,20 +533,35 @@ impl MemoryGraph {
         budget: usize,
         tension_floor: f32,
         seed_quota: usize,
-    ) -> Vec<(u32, f32)> {
+        multipath_bonus: f32,
+    ) -> (Vec<(u32, f32)>, HashMap<u32, u32>) {
         let mut heap = BinaryHeap::new();
         let mut best: HashMap<u32, f32> = HashMap::new();
+        let track = multipath_bonus > 0.0;
+        let mut contributors: HashMap<u32, HashSet<u32>> = HashMap::new();
         let max_depth = ctx.max_hops.map_or(MAX_DEPTH, |h| h.min(255) as u8);
         for &(s, w) in seeds {
             heap.push(State {
                 score: w.clamp(MIN_STRENGTH, 1.0),
                 node: s,
                 depth: 0,
+                origin: s,
             });
         }
-        while let Some(State { score, node, depth }) = heap.pop() {
+        while let Some(State {
+            score,
+            node,
+            depth,
+            origin,
+        }) = heap.pop()
+        {
             if depth > max_depth || score < MIN_STRENGTH {
                 continue;
+            }
+            if track {
+                // 即使本路径强度不如已有最优（下面会跳过处理），它独立到达
+                // 该节点本身即为一次佐证，仍计入 contributors。
+                contributors.entry(node).or_default().insert(origin);
             }
             if best.get(&node).is_some_and(|&b| b >= score) {
                 continue; // 已以更优强度处理过
@@ -561,10 +582,19 @@ impl MemoryGraph {
                         score: next,
                         node: nb,
                         depth: depth + 1,
+                        origin,
                     });
                 }
             }
         }
+        let corroboration: HashMap<u32, u32> = if track {
+            contributors
+                .into_iter()
+                .map(|(id, os)| (id, os.len() as u32))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let mut out: Vec<(u32, f32)> = best.into_iter().collect();
         out.sort_by(|a, b| b.1.total_cmp(&a.1));
         if seed_quota > 0 {
@@ -579,7 +609,7 @@ impl MemoryGraph {
             let rest = out.into_iter().filter(|(id, _)| !hoisted_ids.contains(id));
             out = hoisted.into_iter().chain(rest).collect();
         }
-        out
+        (out, corroboration)
     }
 }
 
@@ -657,6 +687,38 @@ mod tests {
         assert_eq!(out0.len(), 1, "max_hops=0 只应返回种子节点");
         let outd = g.resonate(&[(a, 1.0)], &ContextSpectrum::default(), 0, DEFAULT_BUDGET);
         assert_eq!(outd.len(), 2, "默认应扩散到 1 跳邻居");
+    }
+
+    #[test]
+    fn multipath_corroboration_boosts_shared_node() {
+        // 两个种子 s1/s2 各自经独立 1 跳路径到达共享证据 e；
+        // 另有节点 x 只被 s1 到达。开启追踪后 corroboration 应记录 e=2、x=1，
+        // 加分由调用方（service 层，混合打分后）应用，图内不改变分值。
+        let mut g = MemoryGraph::new();
+        let s1 = g.add_node(node("种子1", &[]));
+        let s2 = g.add_node(node("种子2", &[]));
+        let e = g.add_node(node("共享证据", &[]));
+        let x = g.add_node(node("单路径节点", &[]));
+        g.add_edge(s1, e, 0.9);
+        g.add_edge(s2, e, 0.9);
+        g.add_edge(s1, x, 0.9);
+        let ctx = ContextSpectrum::default();
+        let score_of = |out: &[(u32, f32)], id: u32| {
+            out.iter().find(|&&(n, _)| n == id).map(|&(_, s)| s).unwrap_or(0.0)
+        };
+        // 追踪关闭：不返回佐证计数
+        let (off, co_off) =
+            g.resonate_opts(&[(s1, 1.0), (s2, 1.0)], &ctx, 0, DEFAULT_BUDGET, 0.0, 0, 0.0);
+        assert!(co_off.is_empty(), "关闭时不应追踪");
+        // 追踪开启：e 被 2 个种子独立到达，x 只有 1 个；分值本身不变
+        let (on, co_on) =
+            g.resonate_opts(&[(s1, 1.0), (s2, 1.0)], &ctx, 0, DEFAULT_BUDGET, 0.0, 0, 0.2);
+        assert_eq!(co_on.get(&e).copied(), Some(2), "共享证据应有 2 个佐证源");
+        assert_eq!(co_on.get(&x).copied(), Some(1), "单路径节点应有 1 个佐证源");
+        assert!(
+            (score_of(&on, e) - score_of(&off, e)).abs() < 1e-6,
+            "图内分值不应被佐证改变（加分在 service 层混合打分后应用）"
+        );
     }
 
     #[test]

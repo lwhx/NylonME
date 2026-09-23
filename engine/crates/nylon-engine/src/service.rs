@@ -2038,8 +2038,24 @@ impl MemoryEngine for EngineService {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|f| *f > 0.0 && *f < 1.0)
             .unwrap_or(0.0);
+        // NYLON_MULTIPATH_BONUS（默认 0=关闭）：多路径佐证系数。被 k 个种子经独立
+        // 路径到达的节点，在向量重排后的混合分上乘 1+bonus*min(k-1,3)。
+        // 必须加在重排之后：图内共振分与余弦分尺度差异大，加在图内会被 blend 稀释
+        // （2026-09-23 A/B 实测：图内加成 recall 变化 ±0.1pp，洗脱实锤）。
+        let multipath_bonus = std::env::var("NYLON_MULTIPATH_BONUS")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
         // 种子保底提升统一在向量重排之后做（服务侧），否则重排会打乱图内的提升结果
-        let mut activated = g.resonate_opts(&seeds, &ctx, now_secs(), budget, tension_floor, 0);
+        let (mut activated, corroboration) = g.resonate_opts(
+            &seeds,
+            &ctx,
+            now_secs(),
+            budget,
+            tension_floor,
+            0,
+            multipath_bonus,
+        );
         // 种子补齐：扩散阶段可能因 budget 截断/张力门槛把部分种子挡在激活集外
         // （2026-09-14 十会话评测发现 13 例 seed_hit=true 但 evidence_pos=None）。
         // 直接命中的种子必须留在候选集内，交由后续重排/保底决定最终位次。
@@ -2086,6 +2102,18 @@ impl MemoryEngine for EngineService {
                     .unwrap_or(false);
                 if is_echo {
                     *s *= echo_demote;
+                }
+            }
+            activated.sort_by(|a, b| b.1.total_cmp(&a.1));
+        }
+        // 多路径佐证加成：混合打分（共振+向量）之后、种子保底置顶之前应用。
+        // 被多个种子独立到达的证据节点上浮，单路径高相似节点相对下沉。
+        if multipath_bonus > 0.0 && !corroboration.is_empty() {
+            for (id, s) in activated.iter_mut() {
+                if let Some(&k) = corroboration.get(id) {
+                    if k > 1 {
+                        *s *= 1.0 + multipath_bonus * (k - 1).min(3) as f32;
+                    }
                 }
             }
             activated.sort_by(|a, b| b.1.total_cmp(&a.1));

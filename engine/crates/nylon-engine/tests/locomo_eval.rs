@@ -747,6 +747,32 @@ async fn locomo_evidence_recall() {
                     println!("  Q: {question}");
                     println!("  gold: {gold}");
                     println!("  ours: {}", candidate.as_deref().unwrap_or("<无答案>"));
+                    // 深度解剖（NYLON_EVAL_DUMP_CTX=1）：答错题的全证据命中状态、
+                    // 每条证据在完整激活集内的位次、以及实际喂给作答 LLM 的 Top-10 上下文。
+                    // 用于区分"证据齐但模型弃答/答错"（prompt 问题）与"any-hit 但缺关键跳"
+                    // （排序/检索问题）。
+                    if std::env::var("NYLON_EVAL_DUMP_CTX").is_ok() {
+                        println!("  all_hit={all_hit}");
+                        for e in &evidence {
+                            let pos = dia2nodes.get(e).and_then(|ns| {
+                                ns.iter()
+                                    .filter_map(|n| {
+                                        resp.activated
+                                            .iter()
+                                            .position(|a| a.node_id == *n)
+                                            .map(|p| p + 1)
+                                    })
+                                    .min()
+                            });
+                            let woven = dia2nodes.contains_key(e);
+                            println!("  Epos[{e}]: woven={woven} pos={pos:?}");
+                        }
+                        println!("  ctx:");
+                        for (i, c) in ctx_items.iter().enumerate() {
+                            let snip: String = c.chars().take(110).collect();
+                            println!("   {:>2}. {snip}", i + 1);
+                        }
+                    }
                 }
             }
             if dump_miss && !ok && dump_cat.map(|c| c == cat).unwrap_or(true) {
@@ -934,14 +960,31 @@ async fn answer_with_context(
     question: &str,
 ) -> Option<String> {
     let llm = llm?;
-    let system = "You are an intelligent memory assistant tasked with retrieving accurate information from conversation memories. \
+    // NYLON_EVAL_QA_PROMPT_V2=1：反弃答 + 具体化作答提示。
+    // 动机（2026-09-23 miss 解剖）：361 道 J 错题中 163 道弃答，其中 57 道
+    // 全证据已在 Top-10 内仍答 "Not mentioned"；另有 80 道内容错但证据齐全
+    // （答案笼统/张冠李戴）。弃答在 J 口径下必错，基于部分证据的合理猜测
+    // 期望收益为正。
+    let v2 = std::env::var("NYLON_EVAL_QA_PROMPT_V2").is_ok();
+    let system = if v2 {
+        "You are an intelligent memory assistant tasked with retrieving accurate information from conversation memories. \
+        Instructions: \
+        1. Carefully analyze all provided memories; each memory may be prefixed with a timestamp like [8 May, 2023], pay special attention to these timestamps. \
+        2. If the memories contain contradictory information, prioritize the most recent memory. \
+        3. For relative time references (like \"last year\" or \"two months ago\"), calculate the specific date, month, or year based on the memory timestamps. \
+        4. Formulate a precise, concise answer based solely on the evidence in the memories. Prefer concrete details (names, numbers, dates, specific objects) over generic summaries. For questions asking what/which items, enumerate every relevant item mentioned in the memories. \
+        5. Answer \"Not mentioned\" ONLY if none of the memories contain any information relevant to the question. If there is partial or indirect evidence, give your best grounded answer instead of abstaining. \
+        Output ONLY valid JSON: {\"answer\": \"...\"}."
+    } else {
+        "You are an intelligent memory assistant tasked with retrieving accurate information from conversation memories. \
         Instructions: \
         1. Carefully analyze all provided memories; each memory may be prefixed with a timestamp like [8 May, 2023], pay special attention to these timestamps. \
         2. If the memories contain contradictory information, prioritize the most recent memory. \
         3. For relative time references (like \"last year\" or \"two months ago\"), calculate the specific date, month, or year based on the memory timestamps. \
         4. Formulate a precise, concise answer based solely on the evidence in the memories: a short phrase for factual questions, or the minimal list of items for listing questions. \
         5. If the memories do not contain enough information, the answer must be exactly \"Not mentioned\". \
-        Output ONLY valid JSON: {\"answer\": \"...\"}.";
+        Output ONLY valid JSON: {\"answer\": \"...\"}."
+    };
     let user = format!("Retrieved memories:\n{ctx}\n\nQuestion: {question}");
     let v = llm_json_retry(llm, system, &user).await?;
     v.get("answer")?
