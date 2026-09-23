@@ -358,6 +358,20 @@ pub fn llm_from_env() -> Option<std::sync::Arc<dyn ChatModel>> {
     let model = std::env::var("NYLON_LLM_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
     let key = std::env::var("NYLON_LLM_API_KEY").ok();
     let m = HttpChatModel::new(url, model, key);
+    // NYLON_LLM_TEMPERATURE：数字=显式温度；"omit"=不发送该字段
+    // （kimi-k3 只允许 temperature=1，编织通道复用 QA 通道的同款语义，
+    // 2026-09-23 DeepSeek 欠费切换 Kimi 编织时补齐）
+    let m = match std::env::var("NYLON_LLM_TEMPERATURE").ok().as_deref() {
+        Some("omit") => m.with_temperature(None),
+        Some(s) => match s.parse::<f32>() {
+            Ok(t) => m.with_temperature(Some(t)),
+            Err(_) => {
+                eprintln!("[llm] NYLON_LLM_TEMPERATURE={s} 无法解析，忽略");
+                m
+            }
+        },
+        None => m,
+    };
     // NYLON_LLM_MAX_TOKENS：显式覆盖输出预算（会话长输入截断 JSON 时调大）
     let m = match std::env::var("NYLON_LLM_MAX_TOKENS") {
         Ok(v) => match v.parse::<u32>() {
