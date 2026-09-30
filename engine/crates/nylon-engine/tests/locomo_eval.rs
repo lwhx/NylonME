@@ -160,6 +160,13 @@ async fn locomo_evidence_recall() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // 作答预算加宽（NYLON_EVAL_CTX_K=15/20）：LongMemEval round-4 已验证（J 78.0→83.0，
+    // +5pp，配对 +8/-3）。证据在激活池内但 Top-10 装不下时直接受益；
+    // 只扩大作答上下文条数，recall@10 统计口径不变。
+    let ctx_k: usize = std::env::var("NYLON_EVAL_CTX_K")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(RECALL_K);
     let data: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("读取数据集失败"))
             .expect("解析 JSON 失败");
@@ -696,7 +703,7 @@ async fn locomo_evidence_recall() {
                     })
                     // 附赠通道开启时推断不占 Top-10 证据名额，名额由后续证据补位
                     .filter(|a| !(infer_bonus > 0 && is_inferred(a)))
-                    .take(RECALL_K)
+                    .take(ctx_k)
                     .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
                     .collect();
                 if infer_bonus > 0 {
@@ -720,9 +727,15 @@ async fn locomo_evidence_recall() {
                         let p = judge_answer_paper(qa_llm.as_deref(), question, gold, ans)
                             .await
                             .unwrap_or(false);
-                        let s = judge_answer_strict(qa_llm.as_deref(), question, gold, ans)
-                            .await
-                            .unwrap_or(false);
+                        // NYLON_EVAL_SINGLE_JUDGE=1：跳过严格裁判（Kimi 5h 窗口配额减半，
+                        // 与 LongMemEval harness 2026-09-30 同款旋钮）
+                        let s = if std::env::var("NYLON_EVAL_SINGLE_JUDGE").is_ok() {
+                            p
+                        } else {
+                            judge_answer_strict(qa_llm.as_deref(), question, gold, ans)
+                                .await
+                                .unwrap_or(false)
+                        };
                         (p, s)
                     }
                     None => (false, false),
