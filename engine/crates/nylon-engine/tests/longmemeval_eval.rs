@@ -301,6 +301,13 @@ async fn longmemeval_recall() {
             .as_str()
             .unwrap_or("unknown")
             .to_string();
+        // 题型过滤（NYLON_LME_ONLY_TYPE="multi-session,temporal-reasoning"）：
+        // 配额受限时只跑目标题型的 A/B（2026-09-30 Kimi 5h 窗口 ≈ 90-120 次调用）。
+        if let Ok(only) = std::env::var("NYLON_LME_ONLY_TYPE") {
+            if !only.split(',').any(|t| t.trim() == qtype) {
+                continue;
+            }
+        }
         let sessions = inst["haystack_sessions"]
             .as_array()
             .expect("haystack_sessions 应为数组");
@@ -463,6 +470,13 @@ async fn longmemeval_recall() {
         let question = inst["question"].as_str().unwrap_or("");
         let question_date = inst["question_date"].as_str().unwrap_or("");
         // 联想深度按题型自适应：single-session-* 仅种子（LoCoMo Cat4 结论平移）
+        // 作答预算加大（NYLON_EVAL_CTX_K=15/20）：证据在池里（多会话错题 74 轮证据
+        // 已在 Top-10、70 轮在 11-32 位），Top-10 装不下完整枚举。只扩大作答上下文，
+        // 不动 recall@10 统计口径。
+        let ctx_k: usize = std::env::var("NYLON_EVAL_CTX_K")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(RECALL_K);
         let hops: Option<u32> = if qtype.starts_with("single-session") {
             Some(0)
         } else {
@@ -493,6 +507,52 @@ async fn longmemeval_recall() {
             }
         })
         .await;
+        // 会话多样性重排（NYLON_EVAL_SESSION_DIV=1，题型名单 NYLON_EVAL_SESSION_DIV_TYPES
+        // 默认仅 multi-session）。诊断（2026-09-30 round3）：multi-session J=63%，
+        // any-hit 100% 但 all-hit 0/27——Top-10 被单一证据会话占满，计数/聚合题
+        // 只能看到一半证据。第一轮按分数顺序每个会话取最优节点（覆盖广度），
+        // 第二轮按分数补满 Top-10。单会话题不开（证据本就集中，重排会稀释）。
+        let session_div = std::env::var("NYLON_EVAL_SESSION_DIV").is_ok() && {
+            let types = std::env::var("NYLON_EVAL_SESSION_DIV_TYPES")
+                .unwrap_or_else(|_| "multi-session".into());
+            types.split(',').any(|t| t.trim() == qtype)
+        };
+        let resp = if session_div {
+            // node → session 索引（事件 id 形如 "s{i}t{j}"；事实节点经 source_event_ids 映射）
+            let mut node2sess: HashMap<u64, usize> = HashMap::new();
+            for (ev, ns) in &ev2nodes {
+                let si = ev
+                    .strip_prefix('s')
+                    .and_then(|r| r.split('t').next())
+                    .and_then(|s| s.parse::<usize>().ok());
+                if let Some(i) = si {
+                    for n in ns {
+                        node2sess.insert(*n, i);
+                    }
+                }
+            }
+            let mut covered: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut out: Vec<ActivatedNode> = Vec::new();
+            let mut rest: Vec<ActivatedNode> = Vec::new();
+            for a in resp.activated.into_iter() {
+                match node2sess.get(&a.node_id) {
+                    Some(i) if !covered.contains(i) && out.len() < RECALL_K => {
+                        covered.insert(*i);
+                        out.push(a);
+                    }
+                    _ => rest.push(a),
+                }
+            }
+            if out.len() < RECALL_K {
+                out.extend(rest.into_iter().take(RECALL_K - out.len()));
+            }
+            ResonateResponse {
+                activated: out,
+                seed_ids: resp.seed_ids,
+            }
+        } else {
+            resp
+        };
         let got: Vec<u64> = resp
             .activated
             .iter()
@@ -551,7 +611,7 @@ async fn longmemeval_recall() {
                 let ctx_items: Vec<String> = resp
                     .activated
                     .iter()
-                    .take(RECALL_K)
+                    .take(ctx_k)
                     .filter_map(|a| a.filaments.as_ref().map(|f| f.fact.clone()))
                     .collect();
                 let ctx_text = ctx_items.join("\n");
@@ -566,9 +626,14 @@ async fn longmemeval_recall() {
                         let p = judge_answer_paper(qa_llm.as_deref(), &dated_q, &gold, ans)
                             .await
                             .unwrap_or(false);
-                        let s = judge_answer_strict(qa_llm.as_deref(), &dated_q, &gold, ans)
-                            .await
-                            .unwrap_or(false);
+                        // NYLON_EVAL_SINGLE_JUDGE=1：跳过严格裁判（配额受限 A/B 只看 J 口径）
+                        let s = if std::env::var("NYLON_EVAL_SINGLE_JUDGE").is_ok() {
+                            p
+                        } else {
+                            judge_answer_strict(qa_llm.as_deref(), &dated_q, &gold, ans)
+                                .await
+                                .unwrap_or(false)
+                        };
                         (p, s)
                     }
                     None => (false, false),
