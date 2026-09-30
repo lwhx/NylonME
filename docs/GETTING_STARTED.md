@@ -83,7 +83,7 @@ NYLON_LLM_MODEL=deepseek-v4-flash NYLON_LLM_API_KEY=<your-key> NYLON_LLM_THINKIN
 ./nylon-engine serve 0.0.0.0:50051
 ```
 
-The same binary also serves a **web console + REST API** on `http://127.0.0.1:50052` (override with `NYLON_HTTP_ADDR`, set to `off` to disable). Open it in a browser to browse memories with live tension, debug resonance queries, and weave by hand. REST spec: [api/openapi.json](api/openapi.json).
+The same binary also serves a **web console + REST API** on `http://127.0.0.1:50052` (override with `NYLON_HTTP_ADDR`, set to `off` to disable). The console has six views: **Overview** (engine stats, latest memories, audit activity, tension histogram), **Memories** (browse/filter with live tension), **Graph** (force-directed map of the memory web, color by tension or owner), **Resonate** (debug queries with seeds/scores/adaptive depth, plus a one-click answer-quality feedback bar that feeds idle reflection), **Weave** (single + session batch), and **Audit**. The node drawer offers a **Forget** action (`DELETE /v1/nodes/{id}`, tombstone). Dark/light themes and an EN/中文 toggle are built in. REST spec: [api/openapi.json](api/openapi.json).
 
 ![NylonME Console](ui-console.png)
 
